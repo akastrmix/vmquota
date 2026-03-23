@@ -1,0 +1,30 @@
+[general]
+# 账期和重置日使用的时区
+timezone = "Asia/Shanghai"
+
+# SQLite 状态库位置
+state_db = "/var/lib/vmquota/state.sqlite"
+
+# 是否自动下发 tc/IFB 限速
+enforce_shaping = false
+
+[api]
+# 只读查询接口监听地址
+bind_host = "10.200.0.1"
+
+# 只读查询接口监听端口
+bind_port = 9527
+
+[scope]
+# 默认受管 VMID 范围
+vmid_ranges = ["101-110"]
+
+[defaults]
+# 默认月流量上限，当前按十进制字节计算
+limit_bytes = 2000000000000
+
+# 超额后的目标限速
+throttle_rate = "2mbit"
+
+# 新发现的 VM 是否自动建档
+auto_enroll = true

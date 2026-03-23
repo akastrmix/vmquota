@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+API_BASE=${VMQUOTA_API_BASE:-http://10.200.0.1:9527}
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "traffic: curl not found" >&2
+  exit 1
+fi
+
+if [ ! -r /sys/class/dmi/id/product_uuid ]; then
+  echo "traffic: cannot read BIOS UUID" >&2
+  exit 1
+fi
+
+UUID=$(cat /sys/class/dmi/id/product_uuid)
+
+case "${1:-}" in
+  --json)
+    exec curl -fsS "${API_BASE}/v1/usage?uuid=${UUID}"
+    ;;
+  --brief)
+    exec curl -fsS "${API_BASE}/v1/usage/brief?uuid=${UUID}"
+    ;;
+  "")
+    exec curl -fsS "${API_BASE}/v1/usage/text?uuid=${UUID}"
+    ;;
+  *)
+    echo "usage: traffic [--json|--brief]" >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,363 @@
+from __future__ import annotations
+
+from datetime import datetime
+from .billing import initial_cycle, manual_reanchor_cycle, next_anchor_after, utc_now
+from .config import AppConfig
+from .db import StateDB
+from .models import ManagedVm, VmInfo
+from .parsing import parse_vmid_ranges, vmid_in_ranges
+from .pve import PveInspector
+from .shaping import TrafficShaper
+
+
+class VmQuotaService:
+    def __init__(
+        self,
+        config: AppConfig,
+        db: StateDB,
+        inspector: PveInspector | None = None,
+        shaper: TrafficShaper | None = None,
+    ) -> None:
+        self.config = config
+        self.db = db
+        self.inspector = inspector or PveInspector()
+        self.shaper = shaper or TrafficShaper()
+
+    def sync(self, now: datetime | None = None) -> list[str]:
+        now = now or utc_now()
+        interfaces = self.inspector.existing_interfaces()
+        messages: list[str] = []
+        for vm in self._managed_vms():
+            existing = self.db.get_vm(vm.vmid)
+            if existing is None and not self.config.auto_enroll:
+                continue
+            record = self._ensure_record(vm, now)
+            record = self._roll_period_if_due(record, now, vm, interfaces, messages)
+            record, sampled_counters = self._sample_usage(vm, record, now, interfaces)
+            record.name = vm.name
+            record.last_seen_at = now
+            record.updated_at = now
+            record = self._reconcile_shaping(record, vm, interfaces, now, messages)
+            self.db.save_vm_state(record, sampled_counters, replace_counters=sampled_counters is not None)
+        return messages
+
+    def list_vms(self) -> list[ManagedVm]:
+        return self.db.list_vms()
+
+    def show_vm(self, vmid: int) -> tuple[ManagedVm, list[object]]:
+        record = self.db.get_vm(vmid)
+        if not record:
+            raise ValueError(f"VM {vmid} is not enrolled")
+        return record, self.db.recent_events(vmid)
+
+    def set_vm(
+        self,
+        vmid: int,
+        *,
+        limit_bytes: int | None = None,
+        throttle_bps: int | None = None,
+        anchor_day: int | None = None,
+        now: datetime | None = None,
+    ) -> ManagedVm:
+        now = now or utc_now()
+        record = self._require_record(vmid)
+        return self._apply_policy_updates(
+            record,
+            vmid=vmid,
+            limit_bytes=limit_bytes,
+            throttle_bps=throttle_bps,
+            anchor_day=anchor_day,
+            now=now,
+        )
+
+    def set_range(
+        self,
+        vmid_range: str,
+        *,
+        limit_bytes: int | None = None,
+        throttle_bps: int | None = None,
+        anchor_day: int | None = None,
+        now: datetime | None = None,
+    ) -> tuple[list[ManagedVm], list[int]]:
+        now = now or utc_now()
+        selected = parse_vmid_ranges([vmid_range])[0]
+        discovered = {vm.vmid for vm in self.inspector.discover_vms() if selected.contains(vm.vmid) and not vm.template}
+        enrolled = {vm.vmid for vm in self.db.list_vms() if selected.contains(vm.vmid)}
+        vmids = sorted(discovered | enrolled)
+        updated: list[ManagedVm] = []
+        skipped: list[int] = []
+        for vmid in range(selected.start, selected.end + 1):
+            if vmid not in vmids:
+                skipped.append(vmid)
+                continue
+            record = self._require_record(vmid)
+            updated.append(
+                self._apply_policy_updates(
+                    record,
+                    vmid=vmid,
+                    limit_bytes=limit_bytes,
+                    throttle_bps=throttle_bps,
+                    anchor_day=anchor_day,
+                    now=now,
+                )
+            )
+        return updated, skipped
+
+    def _apply_policy_updates(
+        self,
+        record: ManagedVm,
+        *,
+        vmid: int,
+        limit_bytes: int | None,
+        throttle_bps: int | None,
+        anchor_day: int | None,
+        now: datetime,
+    ) -> ManagedVm:
+        if limit_bytes is not None:
+            record.limit_bytes = limit_bytes
+        if throttle_bps is not None:
+            record.throttle_bps = throttle_bps
+        if anchor_day is not None:
+            period_start, next_reset = manual_reanchor_cycle(now, anchor_day, self.config.timezone)
+            record.anchor_day = anchor_day
+            record.period_start = period_start
+            record.next_reset_at = next_reset
+            record.total_bytes = 0
+            self.db.clear_counters(vmid)
+        record.updated_at = now
+        record = self._reconcile_current_vm(record, vmid, now)
+        self.db.upsert_vm(record)
+        self.db.add_event(
+            vmid,
+            record.bios_uuid,
+            now,
+            "set",
+            "Updated VM policy",
+            {
+                "limit_bytes": record.limit_bytes,
+                "throttle_bps": record.throttle_bps,
+                "anchor_day": record.anchor_day,
+            },
+        )
+        return record
+
+    def reset_vm(
+        self,
+        vmid: int,
+        *,
+        usage_only: bool = False,
+        reanchor_today: bool = False,
+        reanchor_day: int | None = None,
+        now: datetime | None = None,
+    ) -> ManagedVm:
+        now = now or utc_now()
+        record = self._require_record(vmid)
+        if reanchor_today:
+            anchor_day, period_start, next_reset = initial_cycle(now, self.config.timezone)
+            record.anchor_day = anchor_day
+            record.period_start = period_start
+            record.next_reset_at = next_reset
+        elif reanchor_day is not None:
+            period_start, next_reset = manual_reanchor_cycle(now, reanchor_day, self.config.timezone)
+            record.anchor_day = reanchor_day
+            record.period_start = period_start
+            record.next_reset_at = next_reset
+        record.total_bytes = 0
+        record.updated_at = now
+        self.db.clear_counters(vmid)
+        record = self._reconcile_current_vm(record, vmid, now)
+        self.db.upsert_vm(record)
+        self.db.add_event(vmid, record.bios_uuid, now, "reset", "Reset VM usage", {"anchor_day": record.anchor_day})
+        return record
+
+    def throttle_vm(self, vmid: int, action: str, now: datetime | None = None) -> ManagedVm:
+        now = now or utc_now()
+        record = self._require_record(vmid)
+        vm = self.inspector.get_vm(vmid)
+        if not vm:
+            raise ValueError(f"VM {vmid} does not exist on this host")
+        plan = vm.build_traffic_plan(self.inspector.existing_interfaces())
+        if action == "apply":
+            record.manual_throttle = True
+            self.shaper.apply(vmid, plan, record.throttle_bps)
+            record.throttle_active = True
+        else:
+            record.manual_throttle = False
+            self.shaper.clear(vmid, plan)
+            record.throttle_active = False
+        record.updated_at = now
+        self.db.upsert_vm(record)
+        self.db.add_event(vmid, record.bios_uuid, now, f"throttle-{action}", f"Throttle {action}", None)
+        return record
+
+    def _managed_vms(self) -> list[VmInfo]:
+        managed: list[VmInfo] = []
+        for vm in self.inspector.discover_vms():
+            if vm.template:
+                continue
+            if vmid_in_ranges(vm.vmid, self.config.vmid_ranges):
+                managed.append(vm)
+        return managed
+
+    def _ensure_record(self, vm: VmInfo, now: datetime) -> ManagedVm:
+        current = self.db.get_vm(vm.vmid)
+        bios_uuid = vm.bios_uuid or f"vmid-{vm.vmid}"
+        if current and current.bios_uuid == bios_uuid:
+            return current
+        anchor_day, period_start, next_reset = initial_cycle(now, self.config.timezone)
+        record = ManagedVm(
+            vmid=vm.vmid,
+            bios_uuid=bios_uuid,
+            name=vm.name,
+            created_at=now,
+            updated_at=now,
+            last_seen_at=now,
+            anchor_day=anchor_day,
+            period_start=period_start,
+            next_reset_at=next_reset,
+            limit_bytes=self.config.default_limit_bytes,
+            throttle_bps=self.config.default_throttle_bps,
+            manual_throttle=False,
+            throttle_active=False,
+            total_bytes=0,
+            last_sync_at=None,
+        )
+        self.db.clear_counters(vm.vmid)
+        self.db.upsert_vm(record)
+        self.db.add_event(
+            vm.vmid,
+            bios_uuid,
+            now,
+            "enroll" if current is None else "recreate",
+            "Enrolled VM" if current is None else "Detected recreated VM",
+            {"uuid": bios_uuid},
+        )
+        return record
+
+    def _roll_period_if_due(
+        self,
+        record: ManagedVm,
+        now: datetime,
+        vm: VmInfo,
+        interfaces: set[str],
+        messages: list[str],
+    ) -> ManagedVm:
+        if now < record.next_reset_at:
+            return record
+        if record.throttle_active and vm.status == "running" and self.config.enforce_shaping:
+            self.shaper.clear(vm.vmid, vm.build_traffic_plan(interfaces))
+        while now >= record.next_reset_at:
+            record.period_start = record.next_reset_at
+            record.next_reset_at = next_anchor_after(record.period_start, record.anchor_day, self.config.timezone)
+        record.total_bytes = 0
+        record.throttle_active = False
+        record.updated_at = now
+        self.db.clear_counters(record.vmid)
+        self.db.add_event(
+            record.vmid,
+            record.bios_uuid,
+            now,
+            "period-reset",
+            "Started new billing period",
+            {"next_reset_at": record.next_reset_at.isoformat()},
+        )
+        messages.append(f"VM {record.vmid}: billing period reset")
+        return record
+
+    def _sample_usage(
+        self,
+        vm: VmInfo,
+        record: ManagedVm,
+        now: datetime,
+        interfaces: set[str],
+    ) -> tuple[ManagedVm, dict[str, tuple[int, int]] | None]:
+        if vm.status != "running":
+            record.last_sync_at = now
+            return record, None
+        plan = vm.build_traffic_plan(interfaces)
+        previous = self.db.get_counters(vm.vmid)
+        delta_total = 0
+        sampled_counters: dict[str, tuple[int, int]] = {}
+        for nic in plan.counter_devices:
+            rx, tx = self.inspector.read_interface_counters(nic)
+            sampled_counters[nic] = (rx, tx)
+            last = previous.get(nic)
+            if last is not None:
+                delta_total += _counter_delta(last[0], rx)
+                delta_total += _counter_delta(last[1], tx)
+        record.total_bytes += delta_total
+        record.last_sync_at = now
+        return record, sampled_counters
+
+    def _desired_throttle(self, vm: VmInfo, record: ManagedVm) -> bool:
+        if vm.status != "running":
+            return False
+        if record.manual_throttle:
+            return True
+        return self.config.enforce_shaping and record.over_limit
+
+    def _reconcile_current_vm(self, record: ManagedVm, vmid: int, now: datetime) -> ManagedVm:
+        vm = self.inspector.get_vm(vmid)
+        if vm is None:
+            record.throttle_active = False
+            return record
+        interfaces = self.inspector.existing_interfaces()
+        return self._reconcile_shaping(record, vm, interfaces, now, [])
+
+    def _reconcile_shaping(
+        self,
+        record: ManagedVm,
+        vm: VmInfo,
+        interfaces: set[str],
+        now: datetime,
+        messages: list[str],
+    ) -> ManagedVm:
+        plan = vm.build_traffic_plan(interfaces)
+        should_throttle = self._desired_throttle(vm, record)
+        rules_active = self.shaper.is_applied(vm.vmid, plan, record.throttle_bps)
+
+        if should_throttle and not rules_active:
+            self.shaper.apply(vm.vmid, plan, record.throttle_bps)
+            record.throttle_active = True
+            self.db.add_event(
+                vm.vmid,
+                record.bios_uuid,
+                now,
+                "throttle-applied",
+                "Applied shaping",
+                {"rate_bps": record.throttle_bps, "manual": record.manual_throttle},
+            )
+            messages.append(f"VM {vm.vmid}: throttle applied at {record.throttle_bps} bps")
+            return record
+
+        if not should_throttle and rules_active:
+            self.shaper.clear(vm.vmid, plan)
+            record.throttle_active = False
+            self.db.add_event(
+                vm.vmid,
+                record.bios_uuid,
+                now,
+                "throttle-cleared",
+                "Cleared shaping",
+                {"manual": record.manual_throttle},
+            )
+            messages.append(f"VM {vm.vmid}: throttle cleared")
+            return record
+
+        record.throttle_active = should_throttle and rules_active
+        return record
+
+    def _require_record(self, vmid: int) -> ManagedVm:
+        record = self.db.get_vm(vmid)
+        if record:
+            return record
+        vm = self.inspector.get_vm(vmid)
+        if vm is None:
+            raise ValueError(f"VM {vmid} does not exist on this host")
+        return self._ensure_record(vm, utc_now())
+
+
+def _counter_delta(previous: int, current: int) -> int:
+    if current >= previous:
+        return current - previous
+    return current
