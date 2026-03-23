@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,3 +93,32 @@ class ManagedVm:
     @property
     def remaining_bytes(self) -> int:
         return max(self.limit_bytes - self.total_bytes, 0)
+
+
+@dataclass(frozen=True, slots=True)
+class VmEvent:
+    vmid: int
+    bios_uuid: str | None
+    ts: datetime
+    kind: str
+    message: str
+    details: dict[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ShapingAction:
+    action: Literal["apply", "clear"]
+    vmid: int
+    plan: TrafficPlan
+    rate_bps: int
+
+
+@dataclass(slots=True)
+class VmMutationPlan:
+    record: ManagedVm
+    counters: dict[str, tuple[int, int]] | None = None
+    replace_counters: bool = False
+    clear_counters: bool = False
+    events: list[VmEvent] = field(default_factory=list)
+    messages: list[str] = field(default_factory=list)
+    shaping_actions: list[ShapingAction] = field(default_factory=list)

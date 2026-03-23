@@ -24,6 +24,11 @@ class BillingTests(unittest.TestCase):
         next_reset = next_anchor_after(period_start, 31, ZoneInfo("Asia/Shanghai"))
         self.assertEqual(next_reset.isoformat(), "2026-02-27T16:00:00+00:00")
 
+    def test_manual_reanchor_rejects_invalid_day(self) -> None:
+        now = datetime(2026, 3, 23, 12, 0, tzinfo=timezone.utc)
+        with self.assertRaises(ValueError):
+            manual_reanchor_cycle(now, 99, ZoneInfo("Asia/Shanghai"))
+
 
 if __name__ == "__main__":
     unittest.main()

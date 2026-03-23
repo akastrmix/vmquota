@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .models import ManagedVm
+from .models import ManagedVm, VmEvent
 from .parsing import format_bps, format_bytes
 
 
@@ -62,6 +62,17 @@ def local_datetime_text(value: datetime, zone: ZoneInfo) -> str:
 
 def local_event_text(value: str, zone: ZoneInfo) -> str:
     return local_datetime_text(datetime.fromisoformat(value), zone)
+
+
+def build_event_snapshot(event: VmEvent, zone: ZoneInfo) -> dict[str, object]:
+    return {
+        "vmid": event.vmid,
+        "uuid": event.bios_uuid,
+        "ts": local_datetime_text(event.ts, zone),
+        "kind": event.kind,
+        "message": event.message,
+        "details": event.details,
+    }
 
 
 def build_usage_snapshot(vm: ManagedVm, zone: ZoneInfo) -> dict[str, object]:

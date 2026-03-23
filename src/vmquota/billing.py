@@ -4,6 +4,8 @@ from calendar import monthrange
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
+from .parsing import validate_anchor_day
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -33,12 +35,14 @@ def initial_cycle(now_utc: datetime, zone: ZoneInfo) -> tuple[int, datetime, dat
 
 
 def next_anchor_after(period_start_utc: datetime, anchor_day: int, zone: ZoneInfo) -> datetime:
+    anchor_day = validate_anchor_day(anchor_day)
     local_start = period_start_utc.astimezone(zone).date()
     year, month = _next_year_month(local_start.year, local_start.month)
     return local_midnight_to_utc(_month_anchor(year, month, anchor_day), zone)
 
 
 def manual_reanchor_cycle(now_utc: datetime, anchor_day: int, zone: ZoneInfo) -> tuple[datetime, datetime]:
+    anchor_day = validate_anchor_day(anchor_day)
     local_day = now_utc.astimezone(zone).date()
     period_start = local_midnight_to_utc(local_day, zone)
     target_year = local_day.year

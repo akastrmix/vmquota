@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 
 
@@ -74,6 +75,27 @@ def parse_rate_bps(value: str | int) -> int:
     if unit in RATE_UNITS:
         return int(amount * RATE_UNITS[unit])
     raise ValueError(f"unsupported rate unit: {unit}")
+
+
+def validate_anchor_day(value: int) -> int:
+    if not 1 <= value <= 31:
+        raise ValueError("anchor day must be between 1 and 31")
+    return value
+
+
+def normalize_anchor_day(value: int) -> int:
+    return min(max(value, 1), 31)
+
+
+def parse_anchor_day(value: str | int) -> int:
+    try:
+        anchor_day = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("anchor day must be an integer between 1 and 31") from exc
+    try:
+        return validate_anchor_day(anchor_day)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def parse_vmid_ranges(values: list[str]) -> tuple[VmidRange, ...]:

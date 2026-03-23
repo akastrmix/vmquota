@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 import json
 import sqlite3
 
-from .models import ManagedVm
+from .models import ManagedVm, VmEvent
+from .parsing import normalize_anchor_day
 
 
 def _as_datetime(value: str | None) -> datetime | None:
@@ -18,8 +20,9 @@ class StateDB:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path)
+        self.conn = sqlite3.connect(self.path, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
+        self._configure_connection()
         self._initialize()
 
     def close(self) -> None:
@@ -30,6 +33,21 @@ class StateDB:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+
+    @contextmanager
+    def transaction(self):
+        with self.conn:
+            yield
+
+    def _configure_connection(self) -> None:
+        pragmas = (
+            "PRAGMA journal_mode=WAL",
+            "PRAGMA synchronous=NORMAL",
+            "PRAGMA foreign_keys=ON",
+            "PRAGMA busy_timeout=30000",
+        )
+        for pragma in pragmas:
+            self.conn.execute(pragma)
 
     def _initialize(self) -> None:
         self.conn.executescript(
@@ -97,9 +115,9 @@ class StateDB:
         rows = self.conn.execute("SELECT * FROM managed_vms ORDER BY vmid").fetchall()
         return [self._row_to_vm(row) for row in rows]
 
-    def upsert_vm(self, vm: ManagedVm) -> None:
-        self._upsert_vm(vm)
-        self.conn.commit()
+    def upsert_vm(self, vm: ManagedVm, *, commit: bool = True) -> None:
+        with self._maybe_transaction(commit):
+            self._upsert_vm(vm)
 
     def save_vm_state(
         self,
@@ -107,22 +125,27 @@ class StateDB:
         counters: dict[str, tuple[int, int]] | None = None,
         *,
         replace_counters: bool = False,
+        clear_counters: bool = False,
+        events: list[VmEvent] | None = None,
+        commit: bool = True,
     ) -> None:
-        with self.conn:
+        with self._maybe_transaction(commit):
             self._upsert_vm(vm, commit=False)
-            if replace_counters:
+            if replace_counters or clear_counters:
                 self.conn.execute("DELETE FROM nic_counters WHERE vmid = ?", (vm.vmid,))
-                if counters:
-                    self.conn.executemany(
-                        """
-                        INSERT INTO nic_counters (vmid, nic, last_rx_bytes, last_tx_bytes, updated_at)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        [
-                            (vm.vmid, nic, rx, tx, vm.last_sync_at.isoformat() if vm.last_sync_at else vm.updated_at.isoformat())
-                            for nic, (rx, tx) in counters.items()
-                        ],
-                    )
+            if counters:
+                self.conn.executemany(
+                    """
+                    INSERT INTO nic_counters (vmid, nic, last_rx_bytes, last_tx_bytes, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (vm.vmid, nic, rx, tx, vm.last_sync_at.isoformat() if vm.last_sync_at else vm.updated_at.isoformat())
+                        for nic, (rx, tx) in counters.items()
+                    ],
+                )
+            for event in events or []:
+                self._add_event(event)
 
     def _upsert_vm(self, vm: ManagedVm, *, commit: bool = False) -> None:
         self.conn.execute(
@@ -169,19 +192,28 @@ class StateDB:
         if commit:
             self.conn.commit()
 
-    def set_counter(self, vmid: int, nic: str, rx: int, tx: int, updated_at: datetime) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO nic_counters (vmid, nic, last_rx_bytes, last_tx_bytes, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(vmid, nic) DO UPDATE SET
-                last_rx_bytes=excluded.last_rx_bytes,
-                last_tx_bytes=excluded.last_tx_bytes,
-                updated_at=excluded.updated_at
-            """,
-            (vmid, nic, rx, tx, updated_at.isoformat()),
-        )
-        self.conn.commit()
+    def set_counter(
+        self,
+        vmid: int,
+        nic: str,
+        rx: int,
+        tx: int,
+        updated_at: datetime,
+        *,
+        commit: bool = True,
+    ) -> None:
+        with self._maybe_transaction(commit):
+            self.conn.execute(
+                """
+                INSERT INTO nic_counters (vmid, nic, last_rx_bytes, last_tx_bytes, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(vmid, nic) DO UPDATE SET
+                    last_rx_bytes=excluded.last_rx_bytes,
+                    last_tx_bytes=excluded.last_tx_bytes,
+                    updated_at=excluded.updated_at
+                """,
+                (vmid, nic, rx, tx, updated_at.isoformat()),
+            )
 
     def get_counters(self, vmid: int) -> dict[str, tuple[int, int]]:
         rows = self.conn.execute(
@@ -190,31 +222,25 @@ class StateDB:
         ).fetchall()
         return {row["nic"]: (row["last_rx_bytes"], row["last_tx_bytes"]) for row in rows}
 
-    def clear_counters(self, vmid: int) -> None:
-        self.conn.execute("DELETE FROM nic_counters WHERE vmid = ?", (vmid,))
-        self.conn.commit()
+    def clear_counters(self, vmid: int, *, commit: bool = True) -> None:
+        with self._maybe_transaction(commit):
+            self.conn.execute("DELETE FROM nic_counters WHERE vmid = ?", (vmid,))
 
     def add_event(
         self,
-        vmid: int,
-        bios_uuid: str | None,
-        ts: datetime,
-        kind: str,
-        message: str,
-        details: dict[str, object] | None = None,
+        event: VmEvent,
+        *,
+        commit: bool = True,
     ) -> None:
-        payload = json.dumps(details, ensure_ascii=True, sort_keys=True) if details else None
-        self.conn.execute(
-            "INSERT INTO events (vmid, bios_uuid, ts, kind, message, details) VALUES (?, ?, ?, ?, ?, ?)",
-            (vmid, bios_uuid, ts.isoformat(), kind, message, payload),
-        )
-        self.conn.commit()
+        with self._maybe_transaction(commit):
+            self._add_event(event)
 
-    def recent_events(self, vmid: int, limit: int = 10) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT ts, kind, message, details FROM events WHERE vmid = ? ORDER BY id DESC LIMIT ?",
+    def recent_events(self, vmid: int, limit: int = 10) -> list[VmEvent]:
+        rows = self.conn.execute(
+            "SELECT bios_uuid, ts, kind, message, details FROM events WHERE vmid = ? ORDER BY id DESC LIMIT ?",
             (vmid, limit),
         ).fetchall()
+        return [self._row_to_event(vmid, row) for row in rows]
 
     @staticmethod
     def _row_to_vm(row: sqlite3.Row) -> ManagedVm:
@@ -225,7 +251,7 @@ class StateDB:
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
             last_seen_at=datetime.fromisoformat(row["last_seen_at"]),
-            anchor_day=row["anchor_day"],
+            anchor_day=normalize_anchor_day(row["anchor_day"]),
             period_start=datetime.fromisoformat(row["period_start"]),
             next_reset_at=datetime.fromisoformat(row["next_reset_at"]),
             limit_bytes=row["limit_bytes"],
@@ -234,4 +260,39 @@ class StateDB:
             throttle_active=bool(row["throttle_active"]),
             total_bytes=row["total_bytes"],
             last_sync_at=_as_datetime(row["last_sync_at"]),
+        )
+
+    def _add_event(self, event: VmEvent) -> None:
+        payload = json.dumps(event.details, ensure_ascii=True, sort_keys=True) if event.details else None
+        self.conn.execute(
+            "INSERT INTO events (vmid, bios_uuid, ts, kind, message, details) VALUES (?, ?, ?, ?, ?, ?)",
+            (event.vmid, event.bios_uuid, event.ts.isoformat(), event.kind, event.message, payload),
+        )
+
+    def _maybe_transaction(self, commit: bool):
+        return self.transaction() if commit else nullcontext()
+
+    @staticmethod
+    def _row_to_event(vmid: int, row: sqlite3.Row) -> VmEvent:
+        details_text = row["details"]
+        details: dict[str, object] | None
+        if not details_text:
+            details = None
+        else:
+            try:
+                parsed = json.loads(details_text)
+            except json.JSONDecodeError:
+                details = {"raw": details_text}
+            else:
+                if isinstance(parsed, dict):
+                    details = parsed
+                else:
+                    details = {"value": parsed}
+        return VmEvent(
+            vmid=vmid,
+            bios_uuid=row["bios_uuid"],
+            ts=datetime.fromisoformat(row["ts"]),
+            kind=row["kind"],
+            message=row["message"],
+            details=details,
         )

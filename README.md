@@ -16,7 +16,7 @@
 
 ## 设计目标
 
-- 独立：逻辑全部在宿主机侧，模板和客户机内都不用改
+- 独立：核心计费、账期和限速逻辑都在宿主机侧，guest 内不需要常驻 agent；若要启用 VM 内自助查询，只需预置 `traffic` 脚本
 - 轻量：只用 Python 标准库，不依赖第三方 Python 包
 - 模块化：发现、账期、状态、限速、CLI、API 分层实现
 - 可运维：自带安装、卸载、systemd 单元和状态库
@@ -47,6 +47,8 @@
 - `install.sh`：安装脚本
 - `uninstall.sh`：卸载脚本
 - `docs/RUNBOOK.md`：运维手册
+- `docs/TEMPLATE.md`：模板和 guest 脚本说明
+- `docs/ARCHITECTURE.md`：核心实现不变量
 - `AGENTS.md`：给 AI/新对话使用的关键上下文
 
 ## 默认安装路径
@@ -77,6 +79,8 @@ vmquota throttle 101 --clear
 ## 关键说明
 
 - `vmquota` 必须运行在 PVE 宿主机上。
+- `anchor-day` / `reanchor-day` 只接受 `1-31`。
+- `sync` / `list` / `show` / `set` / `set-range` / `reset` / `throttle` 支持 `--json` 机器可读输出。
 - 计数默认读取 `tap<vmid>i<index>`。
 - 当 `firewall=1` 时，下载方向整形优先挂在 `fwln<vmid>i<index>`；若该接口不存在，才回退到 `fwpr<vmid>p<index>`。
 - 第一次 `sync` 主要是建立计数基线；要看到明显累计，通常要等后续 `sync`。
@@ -86,35 +90,12 @@ vmquota throttle 101 --clear
 - 只读查询接口默认建议绑定在 `10.200.0.1:9527`。
 - 示例配置里的 `enforce_shaping = false` 是保守示例值，不代表你线上宿主机当前一定是关闭状态。
 
-## VM 内自助查询
+## 文档导航
 
-模板和现有 VM 建议预置 `/usr/local/bin/traffic`。
-
-用户直接执行：
-
-```bash
-traffic
-```
-
-如果要给脚本调用 JSON：
-
-```bash
-traffic --json
-```
-
-如果要极简原始字段：
-
-```bash
-traffic --brief
-```
-
-`traffic --brief` 返回 4 列原始字段：
-
-```text
-usage_bytes<TAB>limit_bytes<TAB>usage_percent<TAB>state
-```
-
-底层仍然使用 BIOS UUID 向宿主机 API 查询，但用户不需要手动处理 UUID。
+- 宿主机安装、命令和排障请看 [docs/RUNBOOK.md](docs/RUNBOOK.md)
+- 模板和 `traffic` 脚本分发请看 [docs/TEMPLATE.md](docs/TEMPLATE.md)
+- 计费、账期、整形等长期不变量请看 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- AI/后续接手上下文请看 [AGENTS.md](AGENTS.md)
 
 ## 安装
 
@@ -144,10 +125,12 @@ chmod +x install.sh uninstall.sh
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests -v
+PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
 ## 文档
 
-- 运维文档请看 `docs/RUNBOOK.md`
-- 新对话/AI 上下文请看 `AGENTS.md`
+- 运维文档请看 [docs/RUNBOOK.md](docs/RUNBOOK.md)
+- 模板与 guest 脚本请看 [docs/TEMPLATE.md](docs/TEMPLATE.md)
+- 架构不变量请看 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- 新对话/AI 上下文请看 [AGENTS.md](AGENTS.md)

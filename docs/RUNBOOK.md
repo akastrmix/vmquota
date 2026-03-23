@@ -29,6 +29,25 @@
 vmquota list
 ```
 
+如果要给外部脚本或面板调用：
+
+```bash
+vmquota sync --json
+vmquota list --json
+vmquota show 101 --json
+vmquota set 101 --limit 2TB --json
+vmquota set-range 101-110 --limit 2TB --json
+vmquota reset 101 --usage-only --json
+vmquota throttle 101 --apply --json
+```
+
+返回约定：
+
+- `list` / `show` / `set` / `reset` / `throttle` 返回 VM 快照字段，例如 `usage_bytes`、`limit_bytes`、`usage_percent`、`state`、`next_reset_at`
+- `set-range` 额外返回 `updated_count`、`updated`、`skipped`
+- `sync` 返回 `message_count` 和 `messages`
+- 命令失败时，如果带了 `--json`，标准输出会返回 `{"error": "..."}`
+
 `list` 输出里：
 
 - `Progress` 是进度条 + 百分比
@@ -106,6 +125,8 @@ vmquota set-range 101-105 --anchor-day 20
 
 - `set-range` 只会更新范围内“已存在或已建档”的 VM。
 - 范围内不存在的 VMID 会在输出里显示为 skipped。
+- `--anchor-day` / `--reanchor-day` 只接受 `1-31`。
+- `sync` / `list` / `show` / `set` / `set-range` / `reset` / `throttle` 支持 `--json`。
 - `--anchor-day 15` 会把这台 VM 的账期改到每月 15 号重置。
 - 改套餐参数后，当前 VM 的限速状态会立即协调，不需要再等下一轮 `sync`。
 
@@ -251,6 +272,11 @@ traffic --brief
 
 这个命令内部会自动读取 BIOS UUID 并查询宿主机 API，用户不需要手动处理 UUID。
 
+说明：
+
+- `traffic` 只是 guest 内自助查询脚本，不是常驻 agent
+- 宿主机侧的计费、账期和限速逻辑仍全部由 `vmquota` 在 PVE 上执行
+
 文本输出示例：
 
 ```text
@@ -282,31 +308,13 @@ JSON 返回字段包括：
 3. `usage_percent`
 4. `state`
 
-## 10. 模板更新流程
+## 10. 模板与 guest 脚本
 
-如果后面还要修改模板内部内容，不要直接“解模板后硬改”。
+模板更新、`traffic` 脚本分发、工作副本流程和清理清单请统一参考：
 
-推荐固定流程：
+- [TEMPLATE.md](TEMPLATE.md)
 
-1. 从模板 `100` 做一个 **Full Clone** 工作副本
-2. 在工作副本里修改
-3. 验证没问题后，关机并清理唯一身份信息
-4. 用工作副本重新生成新的模板 `100`
-5. 再拉一个一次性测试副本验证
-6. 清理工作副本和测试副本
-
-清理项至少包括：
-
-- `cloud-init clean --logs`
-- `/var/lib/cloud/*`
-- `/etc/machine-id`
-- `/var/lib/dbus/machine-id`
-- `/etc/ssh/ssh_host_*`
-
-说明：
-
-- 不要直接依赖“把 template 标记改回普通 VM”这种方式来长期改模板。
-- 当前 `traffic` 脚本如果要进入新售卖 VM，必须同步到模板 `100`，仅改现有运行中的 VM 不够。
+这里不再重复展开模板操作细节，避免和模板专用文档出现双处维护。
 
 ## 11. 常见排障
 

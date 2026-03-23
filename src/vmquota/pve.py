@@ -1,22 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-import subprocess
 
 from .models import NicConfig, VmInfo
-
-
-@dataclass(slots=True)
-class LocalCommandRunner:
-    def run(self, args: list[str]) -> str:
-        completed = subprocess.run(
-            args,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return completed.stdout
+from .system import CommandRunner, SubprocessCommandRunner
 
 
 class PveInspector:
@@ -24,14 +11,18 @@ class PveInspector:
         self,
         config_dir: Path = Path("/etc/pve/qemu-server"),
         sysfs_root: Path = Path("/sys/class/net"),
-        runner: LocalCommandRunner | None = None,
+        runner: CommandRunner | None = None,
     ) -> None:
         self.config_dir = config_dir
         self.sysfs_root = sysfs_root
-        self.runner = runner or LocalCommandRunner()
+        self.runner = runner or SubprocessCommandRunner()
 
     def list_statuses(self) -> dict[int, str]:
-        output = self.runner.run(["qm", "list"])
+        output = self.runner.run(
+            ["qm", "list"],
+            check=True,
+            error_message="failed to list VM statuses",
+        ).stdout
         statuses: dict[int, str] = {}
         for line in output.splitlines()[1:]:
             line = line.strip()
