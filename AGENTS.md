@@ -3,7 +3,39 @@
 这份文件给新的 AI 对话、子代理或后续接手者提供**高密度上下文**。  
 目标是让新对话在不了解历史聊天的情况下，也能快速理解这套系统的部署方式、运行逻辑和高风险操作边界。
 
-## 1. 项目定位
+## 1. 工作区角色
+
+当前工作区：`C:\Users\Lenovo\Desktop\vmquota`
+
+本工作区只负责：
+
+- `vmquota` 的代码
+- schema
+- 配置结构
+- CLI / API
+- 安装卸载
+- 项目内文档
+
+本工作区不负责：
+
+- `pve-main` 当前现实状态
+- 宿主机网络 / NAT / 端口映射事实
+- `vmaudit` 的内部实现
+
+## 2. 兄弟工作区
+
+- `pve docs`：`C:\Users\Lenovo\Downloads\pve docs`
+- `vmaudit`：`C:\Users\Lenovo\Desktop\vmaudit`
+
+默认先读关系：
+
+- 如果任务涉及宿主机现实配置、测试槽位、端口规划、受管范围，先读：
+  - `C:\Users\Lenovo\Downloads\pve docs\system\SYSTEM_MAP.md`
+  - `C:\Users\Lenovo\Downloads\pve docs\system\OWNERSHIP_MATRIX.md`
+  - `C:\Users\Lenovo\Downloads\pve docs\system\INTEGRATION_CONTRACT.md`
+- 如果任务涉及 `vmaudit` 联动，只引用它的接口和部署契约，不在本仓库复制它的内部文档
+
+## 3. 项目定位
 
 `vmquota` 是运行在 **Proxmox VE 宿主机**上的每 VM 流量配额与超额限速工具。
 
@@ -14,7 +46,7 @@
 - 提供宿主机 CLI 运维接口
 - 提供 VM 内自助查询入口 `traffic`
 
-## 2. 当前部署场景
+## 4. 当前部署场景
 
 已知现网是单节点 PVE，宿主机地址：
 
@@ -28,7 +60,7 @@
 
 - `101-110`
 
-## 3. 网络拓扑
+## 5. 网络拓扑
 
 这套系统依赖当前双网卡结构，不是泛化到任意 PVE 拓扑的版本。
 
@@ -45,15 +77,48 @@
 - 流量统计按宿主机虚拟网卡计数器做，不按 guest IP 做。
 - 计费口径是两张网卡的上行 + 下行总和。
 
-## 4. 关键实现事实
+## 6. 跨工作区读取规则
 
-### 4.1 计费
+### 6.1 只改 `vmquota` 内部逻辑
+
+优先读：
+
+1. 本文件
+2. `README.md`
+3. `docs/ARCHITECTURE.md`
+4. `docs/RUNBOOK.md`
+
+### 6.2 改动会影响宿主机部署契约
+
+例如：
+
+- 默认安装路径
+- systemd 单元名
+- 受管范围约定
+- 测试槽位 `9001` 的联动行为
+
+除了本仓库文档，还要读：
+
+1. `C:\Users\Lenovo\Downloads\pve docs\system\INTEGRATION_CONTRACT.md`
+2. `C:\Users\Lenovo\Downloads\pve docs\state\pve-main.current.md`
+
+如果实际部署到了宿主机，还必须把事实回写到 `pve docs`。
+
+### 6.3 关于唯一真相源
+
+- 宿主机当前事实：以 `pve docs` 为准
+- `vmquota` 内部实现：以本仓库为准
+- 跨组件共享约束：以 `pve docs/system/INTEGRATION_CONTRACT.md` 为准
+
+## 7. 关键实现事实
+
+### 7.1 计费
 
 - 统计来源：`tap<vmid>i<index>` 的 `rx_bytes + tx_bytes`
 - 月账期：按**首次发现当天**作为默认重置日
 - 持久化：SQLite，默认 `/var/lib/vmquota/state.sqlite`
 
-### 4.2 限速
+### 7.2 限速
 
 - 用 `tc + IFB`
 - 上传方向：
@@ -64,13 +129,13 @@
 
 不要再按旧印象把下载方向默认理解成 `fwpr`。
 
-### 4.3 手动限速
+### 7.3 手动限速
 
 - `vmquota throttle <vmid> --apply` 现在是**持久 override**
 - 不会再被下一轮 `sync` 自动清掉
 - 只有显式 `--clear` 才会撤销
 
-### 4.4 VM 内自助查询
+### 7.4 VM 内自助查询
 
 - guest 脚本：`/usr/local/bin/traffic`
 - API 默认绑定：`10.200.0.1:9527`
@@ -80,7 +145,7 @@
 usage_bytes<TAB>limit_bytes<TAB>usage_percent<TAB>state
 ```
 
-## 5. 文档入口
+## 8. 文档入口
 
 主要文档：
 
@@ -89,9 +154,9 @@ usage_bytes<TAB>limit_bytes<TAB>usage_percent<TAB>state
 
 本文件只保留高密度上下文，不替代运维手册。
 
-## 6. 高风险操作边界
+## 9. 高风险操作边界
 
-### 6.1 不要直接硬改模板
+### 9.1 不要直接硬改模板
 
 模板修改必须走下面流程：
 
@@ -105,7 +170,7 @@ usage_bytes<TAB>limit_bytes<TAB>usage_percent<TAB>state
 
 不要直接依赖“解模板后继续改”。
 
-### 6.2 清理模板工作副本时要做的事
+### 9.2 清理模板工作副本时要做的事
 
 至少清理：
 
@@ -117,37 +182,37 @@ usage_bytes<TAB>limit_bytes<TAB>usage_percent<TAB>state
 - `/var/lib/dbus/machine-id`
 - `/etc/ssh/ssh_host_*`
 
-### 6.3 删除/重建实例是高风险动作
+### 9.3 删除/重建实例是高风险动作
 
 - 除非用户明确授权，否则不要主动做删除/重建实例操作
 - 这类动作会影响账本、UUID 识别和模板链路验证
 
-## 7. 已知踩坑点
+## 10. 已知踩坑点
 
-### 7.1 宿主机重启恢复
+### 10.1 宿主机重启恢复
 
 - `vmquota-sync.timer` 和 `vmquota-api.service` 会自动恢复
 - 但“已超额 VM 自动继续被限速”依赖 VM 本身重新运行
 - 如果 VM 没有 `onboot`，宿主机重启后它不会自动启动
 
-### 7.2 停机 VM 的手动限速
+### 10.2 停机 VM 的手动限速
 
 - 如果 VM 当前是 `stopped`，手动 override 会持久化到数据库
 - 但不会立刻出现内核 `tc` 规则
 - 要等 VM 真正运行后才会下发
 
-### 7.3 小流量百分比显示
+### 10.3 小流量百分比显示
 
 - 当前百分比展示对极小占比会显示成 `<0.01%`
 - 这是刻意设计，不是统计失效
 
-### 7.4 旧配置升级
+### 10.4 旧配置升级
 
 - 老配置可能没有 `[api]`
 - 当前安装脚本会自动补 `[api]` 段
 - 如果是手工复制老配置而不是走安装脚本，容易漏掉
 
-## 8. 当前推荐的验证顺序
+## 11. 当前推荐的验证顺序
 
 如果 AI 需要继续验证系统，不要盲目大动作，优先顺序建议是：
 
@@ -156,7 +221,7 @@ usage_bytes<TAB>limit_bytes<TAB>usage_percent<TAB>state
 3. 再做小流量或短时 `iperf3`
 4. 涉及模板修改时，一律先走 Full Clone 工作副本
 
-## 9. 不要写进仓库的内容
+## 12. 不要写进仓库的内容
 
 不要把这些内容写进仓库：
 

@@ -37,6 +37,32 @@
 
 示例配置默认管理 `VMID 101-110`。
 
+## 跨工作区协作
+
+`vmquota` 不是孤立项目。当前常用工作区一共有 3 个：
+
+- `C:\Users\Lenovo\Downloads\pve docs`
+  - 宿主机事实、部署记录、检查脚本、跨组件约束
+- `C:\Users\Lenovo\Desktop\vmquota`
+  - `vmquota` 自身的代码、schema、配置、CLI/API 和项目文档
+- `C:\Users\Lenovo\Desktop\vmaudit`
+  - `vmaudit` 自身的代码、schema、配置、CLI 和项目文档
+
+如果任务涉及下面这些内容，不要只看本仓库：
+
+- `pve-main` 当前现实状态
+- 测试槽位 `9001`
+- 受管范围约定
+- 端口规划
+- 跨组件共享契约
+
+默认先读：
+
+- `AGENTS.md`
+- `C:\Users\Lenovo\Downloads\pve docs\system\SYSTEM_MAP.md`
+- `C:\Users\Lenovo\Downloads\pve docs\system\OWNERSHIP_MATRIX.md`
+- `C:\Users\Lenovo\Downloads\pve docs\system\INTEGRATION_CONTRACT.md`
+
 ## 目录结构
 
 - `src/vmquota/`：主程序源码
