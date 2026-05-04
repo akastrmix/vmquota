@@ -44,6 +44,7 @@
 - 配置文件：`/etc/vmquota/config.toml`
 - 状态库：`/var/lib/vmquota/state.sqlite`
 - API 服务：`10.200.0.1:9527`
+- API 查询记录：`/var/lib/vmquota/api-access.jsonl`
 
 ## 常用命令
 
@@ -56,6 +57,7 @@ vmquota set-range 101-110 --limit 2TB
 vmquota reset 101 --usage-only
 vmquota throttle 101 --apply
 vmquota throttle 101 --clear
+vmquota access-log
 ```
 
 JSON 输出：

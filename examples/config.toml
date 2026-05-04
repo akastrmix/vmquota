@@ -15,6 +15,10 @@ bind_host = "10.200.0.1"
 # 只读查询接口监听端口
 bind_port = 9527
 
+# API 查询记录 JSONL 文件；access_log_max_entries = 0 表示关闭
+access_log = "/var/lib/vmquota/api-access.jsonl"
+access_log_max_entries = 1000
+
 [scope]
 # 默认受管 VMID 范围
 vmid_ranges = ["101-110"]

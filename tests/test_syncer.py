@@ -152,6 +152,168 @@ class SyncerTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_reset_event_records_cleared_usage_and_cycle_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=False,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+            )
+            db = StateDB(config.state_db)
+            try:
+                service = VmQuotaService(config=config, db=db, inspector=FakeInspector(), shaper=FakeShaper())
+                now = datetime(2026, 3, 23, 4, 40, tzinfo=timezone.utc)
+                service.sync(now=now)
+                original = db.get_vm(101)
+                self.assertIsNotNone(original)
+                assert original is not None
+                original.total_bytes = 12345
+                db.upsert_vm(original)
+
+                reset_at = datetime(2026, 3, 25, 1, 0, tzinfo=timezone.utc)
+                updated = service.reset_vm(101, reanchor_day=20, now=reset_at)
+                event = db.recent_events(101, limit=1)[0]
+
+                self.assertEqual(event.kind, "reset")
+                self.assertEqual(event.details["mode"], "reanchor-day")
+                self.assertEqual(event.details["cleared_total_bytes"], 12345)
+                self.assertEqual(event.details["old"]["period_start"], original.period_start.isoformat())
+                self.assertEqual(event.details["old"]["next_reset_at"], original.next_reset_at.isoformat())
+                self.assertEqual(event.details["new"]["period_start"], updated.period_start.isoformat())
+                self.assertEqual(event.details["new"]["next_reset_at"], updated.next_reset_at.isoformat())
+            finally:
+                db.close()
+
+    def test_set_event_records_old_and_new_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=False,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+            )
+            db = StateDB(config.state_db)
+            try:
+                service = VmQuotaService(config=config, db=db, inspector=FakeInspector(), shaper=FakeShaper())
+                now = datetime(2026, 3, 23, 4, 40, tzinfo=timezone.utc)
+                service.sync(now=now)
+                original = db.get_vm(101)
+                self.assertIsNotNone(original)
+                assert original is not None
+
+                service.set_vm(101, limit_bytes=500_000_000_000, throttle_bps=1_000_000)
+                event = db.recent_events(101, limit=1)[0]
+
+                self.assertEqual(event.kind, "set")
+                self.assertEqual(
+                    event.details,
+                    {
+                        "old": {
+                            "limit_bytes": original.limit_bytes,
+                            "throttle_bps": original.throttle_bps,
+                            "anchor_day": original.anchor_day,
+                        },
+                        "new": {
+                            "limit_bytes": 500_000_000_000,
+                            "throttle_bps": 1_000_000,
+                            "anchor_day": original.anchor_day,
+                        },
+                    },
+                )
+            finally:
+                db.close()
+
+    def test_set_anchor_day_event_records_cleared_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=False,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+            )
+            db = StateDB(config.state_db)
+            try:
+                service = VmQuotaService(config=config, db=db, inspector=FakeInspector(), shaper=FakeShaper())
+                now = datetime(2026, 3, 23, 4, 40, tzinfo=timezone.utc)
+                service.sync(now=now)
+                original = db.get_vm(101)
+                self.assertIsNotNone(original)
+                assert original is not None
+                original.total_bytes = 4321
+                db.upsert_vm(original)
+
+                updated = service.set_vm(101, anchor_day=20, now=datetime(2026, 3, 25, 1, 0, tzinfo=timezone.utc))
+                event = db.recent_events(101, limit=1)[0]
+
+                self.assertEqual(event.kind, "set")
+                self.assertEqual(event.details["cleared_total_bytes"], 4321)
+                self.assertEqual(event.details["cycle_old"]["period_start"], original.period_start.isoformat())
+                self.assertEqual(event.details["cycle_new"]["period_start"], updated.period_start.isoformat())
+            finally:
+                db.close()
+
+    def test_period_reset_event_records_previous_total(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=False,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+            )
+            db = StateDB(config.state_db)
+            try:
+                service = VmQuotaService(config=config, db=db, inspector=FakeInspector(), shaper=FakeShaper())
+                now = datetime(2026, 3, 23, 4, 40, tzinfo=timezone.utc)
+                service.sync(now=now)
+                original = db.get_vm(101)
+                self.assertIsNotNone(original)
+                assert original is not None
+                original.total_bytes = 67890
+                original.next_reset_at = datetime(2026, 3, 24, 0, 0, tzinfo=timezone.utc)
+                db.upsert_vm(original)
+
+                service.sync(now=datetime(2026, 3, 24, 0, 1, tzinfo=timezone.utc))
+                updated = db.get_vm(101)
+                self.assertIsNotNone(updated)
+                assert updated is not None
+                event = db.recent_events(101, limit=1)[0]
+
+                self.assertEqual(event.kind, "period-reset")
+                self.assertEqual(event.details["cleared_total_bytes"], 67890)
+                self.assertEqual(event.details["old"]["next_reset_at"], original.next_reset_at.isoformat())
+                self.assertEqual(event.details["new"]["period_start"], updated.period_start.isoformat())
+            finally:
+                db.close()
+
     def test_sync_clears_throttle_when_vm_is_back_under_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             config = AppConfig(

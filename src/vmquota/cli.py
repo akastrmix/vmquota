@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 
+from .access_log import read_access_log
 from .api import serve_api
 from .config import AppConfig
 from .config import load_config
@@ -13,6 +14,7 @@ from .parsing import format_bps, parse_anchor_day, parse_byte_size, parse_rate_b
 from .presentation import (
     build_event_snapshot,
     build_usage_snapshot,
+    event_summary,
     local_datetime_text,
     remaining_summary,
     state_label,
@@ -34,6 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser = subparsers.add_parser("list", help="List managed VMs")
     list_parser.add_argument("--json", action="store_true", dest="json_output_subcommand", help=argparse.SUPPRESS)
     subparsers.add_parser("serve", help="Run read-only HTTP usage API")
+
+    access_log_parser = subparsers.add_parser("access-log", help="Show recent API access log entries")
+    access_log_parser.add_argument("--limit", type=int, default=50, help="Number of recent entries to show")
+    access_log_parser.add_argument("--json", action="store_true", dest="json_output_subcommand", help=argparse.SUPPRESS)
 
     show_parser = subparsers.add_parser("show", help="Show one managed VM")
     show_parser.add_argument("vmid", type=int)
@@ -78,6 +84,22 @@ def main(argv: list[str] | None = None) -> int:
     json_output = args.json_output or getattr(args, "json_output_subcommand", False)
     if args.command == "serve":
         return serve_api(config)
+    if args.command == "access-log":
+        if args.limit < 0:
+            parser.error("access-log --limit must be >= 0")
+        try:
+            entries = read_access_log(config.api_access_log, limit=args.limit)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            if json_output:
+                _print_json({"error": str(exc)})
+                return 1
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if json_output:
+            _print_json({"entries": entries})
+            return 0
+        _print_access_log(entries)
+        return 0
     db = StateDB(config.state_db)
     service = VmQuotaService(config=config, db=db)
     try:
@@ -109,7 +131,9 @@ def main(argv: list[str] | None = None) -> int:
                 print("")
                 print("Recent events:")
                 for event in events:
-                    print(f"- {local_datetime_text(event.ts, config.timezone)} {event.kind}: {event.message}")
+                    summary = event_summary(event)
+                    suffix = f", {summary}" if summary else ""
+                    print(f"- {local_datetime_text(event.ts, config.timezone)} {event.kind}: {event.message}{suffix}")
             return 0
         if args.command == "set":
             if args.limit is None and args.throttle is None and args.anchor_day is None:
@@ -193,6 +217,31 @@ def _print_list(vms: list[ManagedVm], config: AppConfig) -> None:
                 state_label(vm),
             ]
         )
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for idx, value in enumerate(row):
+            widths[idx] = max(widths[idx], len(value))
+    print("  ".join(header.ljust(widths[idx]) for idx, header in enumerate(headers)))
+    print("  ".join("-" * width for width in widths))
+    for row in rows:
+        print("  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)))
+
+
+def _print_access_log(entries: list[dict[str, object]]) -> None:
+    if not entries:
+        print("No API access log entries.")
+        return
+    headers = ["Time", "Path", "Status", "VMID", "UUID"]
+    rows = [
+        [
+            str(entry.get("ts") or ""),
+            str(entry.get("path") or ""),
+            str(entry.get("status") or ""),
+            str(entry.get("vmid") or "-"),
+            str(entry.get("uuid") or "-"),
+        ]
+        for entry in entries
+    ]
     widths = [len(header) for header in headers]
     for row in rows:
         for idx, value in enumerate(row):

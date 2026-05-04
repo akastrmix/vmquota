@@ -9,6 +9,7 @@
 | CLI | `/usr/local/bin/vmquota` |
 | 配置 | `/etc/vmquota/config.toml` |
 | 状态库 | `/var/lib/vmquota/state.sqlite` |
+| API 查询记录 | `/var/lib/vmquota/api-access.jsonl` |
 | 应用目录 | `/opt/vmquota` |
 | 同步 timer | `vmquota-sync.timer` |
 | 同步 service | `vmquota-sync.service` |
@@ -38,6 +39,7 @@ vmquota reset 101 --reanchor-today
 vmquota reset 101 --reanchor-day 20
 vmquota throttle 101 --apply
 vmquota throttle 101 --clear
+vmquota access-log
 ```
 
 JSON 输出：
@@ -50,6 +52,7 @@ vmquota set 101 --limit 2TB --json
 vmquota set-range 101-110 --limit 2TB --json
 vmquota reset 101 --usage-only --json
 vmquota throttle 101 --apply --json
+vmquota access-log --json
 ```
 
 JSON 约定：
@@ -57,6 +60,7 @@ JSON 约定：
 - `list/show/set/reset/throttle` 返回 VM 快照字段，例如 `usage_bytes`、`limit_bytes`、`usage_percent`、`state`、`next_reset_at`。
 - `set-range` 额外返回 `updated_count`、`updated`、`skipped`。
 - `sync` 返回 `message_count` 和 `messages`。
+- `access-log` 返回最近 API 查询记录。
 - 失败时如果带 `--json`，标准输出返回 `{"error": "..."}`。
 
 ## 3. 查看状态
@@ -232,7 +236,29 @@ JSON 常用字段：
 - `state`
 - `next_reset_at`
 
-## 10. 排障
+## 10. API 查询记录
+
+查看最近 API 查询：
+
+```bash
+vmquota access-log
+vmquota access-log --limit 100
+vmquota access-log --json
+```
+
+默认记录到 `/var/lib/vmquota/api-access.jsonl`，保留最近 1000 条。记录范围是 `/v1/usage`、`/v1/usage/text`、`/v1/usage/brief`，不记录 `/healthz`。
+
+单条记录包含时间、路径、UUID、HTTP 状态码和匹配到的 VMID。配置里可调整：
+
+```toml
+[api]
+access_log = "/var/lib/vmquota/api-access.jsonl"
+access_log_max_entries = 1000
+```
+
+`access_log_max_entries = 0` 表示关闭查询记录。
+
+## 11. 排障
 
 ### `list` 里没有 VM
 
@@ -286,7 +312,7 @@ sed -n '1,160p' /etc/vmquota/config.toml
 systemctl restart vmquota-api.service
 ```
 
-## 11. 卸载与回滚
+## 12. 卸载与回滚
 
 普通卸载：
 
@@ -307,7 +333,7 @@ sed -i 's/enforce_shaping = true/enforce_shaping = false/' /etc/vmquota/config.t
 vmquota sync
 ```
 
-## 12. 推荐操作顺序
+## 13. 推荐操作顺序
 
 新增 VM：
 

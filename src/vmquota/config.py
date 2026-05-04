@@ -25,6 +25,8 @@ class AppConfig:
     vmid_ranges: tuple[VmidRange, ...]
     default_limit_bytes: int
     default_throttle_bps: int
+    api_access_log: Path = Path("/var/lib/vmquota/api-access.jsonl")
+    api_access_log_max_entries: int = 1000
 
 
 def load_config(path: str | os.PathLike[str] | None = None) -> AppConfig:
@@ -47,6 +49,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AppConfig:
         state_db=Path(_get_str(general, "state_db", default="/var/lib/vmquota/state.sqlite", section="general")),
         api_bind_host=_get_str(api, "bind_host", default="10.200.0.1", section="api"),
         api_bind_port=_get_int(api, "bind_port", default=9527, section="api", min_value=1, max_value=65535),
+        api_access_log=Path(_get_str(api, "access_log", default="/var/lib/vmquota/api-access.jsonl", section="api")),
+        api_access_log_max_entries=_get_int(api, "access_log_max_entries", default=1000, section="api", min_value=0),
         enforce_shaping=_get_bool(general, "enforce_shaping", default=False, section="general"),
         auto_enroll=_get_bool(defaults, "auto_enroll", default=True, section="defaults"),
         vmid_ranges=vmid_ranges,

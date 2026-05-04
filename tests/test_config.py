@@ -43,7 +43,34 @@ auto_enroll = false
             self.assertTrue(config.enforce_shaping)
             self.assertFalse(config.auto_enroll)
             self.assertEqual(config.api_bind_port, 9527)
+            self.assertEqual(config.api_access_log, Path("/var/lib/vmquota/api-access.jsonl"))
+            self.assertEqual(config.api_access_log_max_entries, 1000)
             self.assertEqual(config.default_limit_bytes, 2_000_000_000_000)
+
+    def test_load_config_accepts_api_access_log_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config_path = Path(tempdir) / "config.toml"
+            access_log = Path(tempdir) / "access.jsonl"
+            config_path.write_text(
+                f"""
+[general]
+
+[api]
+access_log = "{access_log.as_posix()}"
+access_log_max_entries = 25
+
+[scope]
+vmid_ranges = ["101-110"]
+
+[defaults]
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+            self.assertEqual(config.api_access_log, access_log)
+            self.assertEqual(config.api_access_log_max_entries, 25)
 
     def test_load_config_rejects_string_booleans(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

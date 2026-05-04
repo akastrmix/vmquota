@@ -65,6 +65,7 @@
 
 - 宿主机只读 API 默认绑定 `10.200.0.1:9527`
 - `traffic` 通过 BIOS UUID 查询宿主机 API
+- API 查询记录默认写入 `/var/lib/vmquota/api-access.jsonl`，只保留最近配置条数，不写入 `events`
 - `traffic --brief` 返回 4 列：
 
 ```text

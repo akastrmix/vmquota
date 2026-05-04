@@ -150,6 +150,14 @@ class VmQuotaService:
     ) -> VmMutationPlan:
         record, clear_counters, events = self._require_record_state(vmid, now)
         plan = VmMutationPlan(record=record, clear_counters=clear_counters, events=events)
+        old_policy = {
+            "limit_bytes": plan.record.limit_bytes,
+            "throttle_bps": plan.record.throttle_bps,
+            "anchor_day": plan.record.anchor_day,
+        }
+        previous_total_bytes = plan.record.total_bytes
+        previous_period_start = plan.record.period_start
+        previous_next_reset_at = plan.record.next_reset_at
         if limit_bytes is not None:
             plan.record.limit_bytes = limit_bytes
         if throttle_bps is not None:
@@ -170,6 +178,24 @@ class VmQuotaService:
             interfaces = self.inspector.existing_interfaces()
             traffic_plan, rules_active = self._runtime_snapshot(vm, interfaces, plan.record.throttle_bps)
             self._plan_shaping_reconciliation(plan, vm, now, traffic_plan, rules_active)
+        details: dict[str, object] = {
+            "old": old_policy,
+            "new": {
+                "limit_bytes": plan.record.limit_bytes,
+                "throttle_bps": plan.record.throttle_bps,
+                "anchor_day": plan.record.anchor_day,
+            },
+        }
+        if anchor_day is not None:
+            details["cleared_total_bytes"] = previous_total_bytes
+            details["cycle_old"] = {
+                "period_start": previous_period_start.isoformat(),
+                "next_reset_at": previous_next_reset_at.isoformat(),
+            }
+            details["cycle_new"] = {
+                "period_start": plan.record.period_start.isoformat(),
+                "next_reset_at": plan.record.next_reset_at.isoformat(),
+            }
         plan.events.append(
             VmEvent(
                 vmid=vmid,
@@ -177,11 +203,7 @@ class VmQuotaService:
                 ts=now,
                 kind="set",
                 message="Updated VM policy",
-                details={
-                    "limit_bytes": plan.record.limit_bytes,
-                    "throttle_bps": plan.record.throttle_bps,
-                    "anchor_day": plan.record.anchor_day,
-                },
+                details=details,
             )
         )
         return plan
@@ -196,12 +218,19 @@ class VmQuotaService:
     ) -> VmMutationPlan:
         record, clear_counters, events = self._require_record_state(vmid, now)
         plan = VmMutationPlan(record=record, clear_counters=clear_counters, events=events)
+        previous_total_bytes = plan.record.total_bytes
+        previous_period_start = plan.record.period_start
+        previous_next_reset_at = plan.record.next_reset_at
+        previous_anchor_day = plan.record.anchor_day
+        mode = "usage-only"
         if reanchor_today:
+            mode = "reanchor-today"
             anchor_day, period_start, next_reset = initial_cycle(now, self.config.timezone)
             plan.record.anchor_day = anchor_day
             plan.record.period_start = period_start
             plan.record.next_reset_at = next_reset
         elif reanchor_day is not None:
+            mode = "reanchor-day"
             reanchor_day = validate_anchor_day(reanchor_day)
             period_start, next_reset = manual_reanchor_cycle(now, reanchor_day, self.config.timezone)
             plan.record.anchor_day = reanchor_day
@@ -224,7 +253,20 @@ class VmQuotaService:
                 ts=now,
                 kind="reset",
                 message="Reset VM usage",
-                details={"anchor_day": plan.record.anchor_day},
+                details={
+                    "mode": mode,
+                    "cleared_total_bytes": previous_total_bytes,
+                    "old": {
+                        "period_start": previous_period_start.isoformat(),
+                        "next_reset_at": previous_next_reset_at.isoformat(),
+                        "anchor_day": previous_anchor_day,
+                    },
+                    "new": {
+                        "period_start": plan.record.period_start.isoformat(),
+                        "next_reset_at": plan.record.next_reset_at.isoformat(),
+                        "anchor_day": plan.record.anchor_day,
+                    },
+                },
             )
         )
         return plan
@@ -363,6 +405,9 @@ class VmQuotaService:
                 ShapingAction(action="clear", vmid=vm.vmid, plan=traffic_plan, rate_bps=plan.record.throttle_bps)
             )
             rules_active = False
+        previous_total_bytes = plan.record.total_bytes
+        previous_period_start = plan.record.period_start
+        previous_next_reset_at = plan.record.next_reset_at
         while now >= plan.record.next_reset_at:
             plan.record.period_start = plan.record.next_reset_at
             plan.record.next_reset_at = next_anchor_after(plan.record.period_start, plan.record.anchor_day, self.config.timezone)
@@ -377,7 +422,19 @@ class VmQuotaService:
                 ts=now,
                 kind="period-reset",
                 message="Started new billing period",
-                details={"next_reset_at": plan.record.next_reset_at.isoformat()},
+                details={
+                    "cleared_total_bytes": previous_total_bytes,
+                    "old": {
+                        "period_start": previous_period_start.isoformat(),
+                        "next_reset_at": previous_next_reset_at.isoformat(),
+                        "anchor_day": plan.record.anchor_day,
+                    },
+                    "new": {
+                        "period_start": plan.record.period_start.isoformat(),
+                        "next_reset_at": plan.record.next_reset_at.isoformat(),
+                        "anchor_day": plan.record.anchor_day,
+                    },
+                },
             )
         )
         plan.messages.append(f"VM {plan.record.vmid}: billing period reset")

@@ -75,6 +75,40 @@ def build_event_snapshot(event: VmEvent, zone: ZoneInfo) -> dict[str, object]:
     }
 
 
+def event_summary(event: VmEvent) -> str | None:
+    details = event.details or {}
+    if event.kind == "set":
+        old = _dict_value(details.get("old"))
+        new = _dict_value(details.get("new"))
+        if old is None or new is None:
+            return None
+        changes: list[str] = []
+        if old.get("limit_bytes") != new.get("limit_bytes"):
+            changes.append(f"limit {_format_bytes_value(old.get('limit_bytes'))} -> {_format_bytes_value(new.get('limit_bytes'))}")
+        if old.get("throttle_bps") != new.get("throttle_bps"):
+            changes.append(f"throttle {_format_bps_value(old.get('throttle_bps'))} -> {_format_bps_value(new.get('throttle_bps'))}")
+        if old.get("anchor_day") != new.get("anchor_day"):
+            changes.append(f"reset day {old.get('anchor_day')} -> {new.get('anchor_day')}")
+        total = details.get("cleared_total_bytes")
+        if isinstance(total, int):
+            changes.append(f"cleared {format_bytes(total)}")
+        return ", ".join(changes) if changes else None
+    if event.kind in {"reset", "period-reset"}:
+        total = details.get("cleared_total_bytes")
+        if not isinstance(total, int):
+            return None
+        summary = f"cleared {format_bytes(total)}"
+        mode = details.get("mode")
+        if isinstance(mode, str):
+            summary = f"{summary}, mode={mode}"
+        return summary
+    if event.kind == "throttle-applied":
+        rate = details.get("rate_bps")
+        if isinstance(rate, int):
+            return f"rate {format_bps(rate)}"
+    return None
+
+
 def build_usage_snapshot(vm: ManagedVm, zone: ZoneInfo) -> dict[str, object]:
     return {
         "vmid": vm.vmid,
@@ -127,3 +161,15 @@ def render_usage_brief(snapshot: dict[str, object]) -> str:
         f"{snapshot['usage_percent']:.6f}\t"
         f"{snapshot['state']}"
     )
+
+
+def _dict_value(value: object) -> dict[str, object] | None:
+    return value if isinstance(value, dict) else None
+
+
+def _format_bytes_value(value: object) -> str:
+    return format_bytes(value) if isinstance(value, int) else str(value)
+
+
+def _format_bps_value(value: object) -> str:
+    return format_bps(value) if isinstance(value, int) else str(value)

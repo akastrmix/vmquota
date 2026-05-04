@@ -53,7 +53,7 @@ class FakeService:
                 ts=datetime(2026, 3, 24, 1, 0, tzinfo=timezone.utc),
                 kind="reset",
                 message="Reset VM usage",
-                details={"anchor_day": 23},
+                details={"mode": "usage-only", "cleared_total_bytes": 1024},
             )
         ]
 
@@ -108,7 +108,33 @@ class CliTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["vmid"], 101)
             self.assertEqual(payload["recent_events"][0]["kind"], "reset")
-            self.assertEqual(payload["recent_events"][0]["details"], {"anchor_day": 23})
+            self.assertEqual(payload["recent_events"][0]["details"], {"mode": "usage-only", "cleared_total_bytes": 1024})
+
+    def test_show_text_output_includes_compact_event_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=False,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+            )
+            output = StringIO()
+            with (
+                patch("vmquota.cli.load_config", return_value=config),
+                patch("vmquota.cli.StateDB", FakeStateDB),
+                patch("vmquota.cli.VmQuotaService", return_value=FakeService()),
+                redirect_stdout(output),
+            ):
+                exit_code = main(["show", "101"])
+            self.assertEqual(exit_code, 0)
+            self.assertIn("reset: Reset VM usage, cleared 1.02 KB, mode=usage-only", output.getvalue())
 
     def test_set_range_json_output_includes_skipped_vmids(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -137,6 +163,70 @@ class CliTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["updated_count"], 1)
             self.assertEqual(payload["skipped"], [102, 103])
+
+    def test_access_log_json_output_reads_recent_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            access_log = Path(tempdir) / "api-access.jsonl"
+            access_log.write_text(
+                '{"path": "/v1/usage", "status": 200, "ts": "2026-03-24T09:00:00+08:00", "uuid": "uuid-101", "vmid": 101}\n',
+                encoding="utf-8",
+            )
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=False,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+                api_access_log=access_log,
+                api_access_log_max_entries=1000,
+            )
+            output = StringIO()
+            with (
+                patch("vmquota.cli.load_config", return_value=config),
+                redirect_stdout(output),
+            ):
+                exit_code = main(["access-log", "--json"])
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["entries"][0]["uuid"], "uuid-101")
+
+    def test_access_log_text_output_is_compact(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            access_log = Path(tempdir) / "api-access.jsonl"
+            access_log.write_text(
+                '{"path": "/v1/usage/brief", "status": 404, "ts": "2026-03-24T09:00:00+08:00", "uuid": "missing", "vmid": null}\n',
+                encoding="utf-8",
+            )
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=False,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+                api_access_log=access_log,
+                api_access_log_max_entries=1000,
+            )
+            output = StringIO()
+            with (
+                patch("vmquota.cli.load_config", return_value=config),
+                redirect_stdout(output),
+            ):
+                exit_code = main(["access-log"])
+            self.assertEqual(exit_code, 0)
+            self.assertIn("/v1/usage/brief", output.getvalue())
+            self.assertIn("missing", output.getvalue())
 
     def test_show_json_error_output_is_machine_readable(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

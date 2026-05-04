@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .access_log import append_access_log
 from .config import AppConfig
 from .db import StateDB
 from .presentation import build_usage_snapshot, render_usage_brief, render_usage_text
@@ -39,18 +41,24 @@ def make_handler(config: AppConfig) -> type[BaseHTTPRequestHandler]:
             query = parse_qs(parsed.query, keep_blank_values=True)
             uuid_values = query.get("uuid", [])
             if len(uuid_values) != 1:
+                self._record_access(parsed.path, None, HTTPStatus.BAD_REQUEST, None)
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "missing uuid" if not uuid_values else "duplicate uuid"})
                 return
             uuid = uuid_values[0].strip()
             if not uuid:
+                self._record_access(parsed.path, None, HTTPStatus.BAD_REQUEST, None)
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "missing uuid"})
                 return
 
             snapshot = lookup_snapshot(config, uuid)
             if snapshot is None:
+                self._record_access(parsed.path, uuid, HTTPStatus.NOT_FOUND, None)
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "vm not found"})
                 return
 
+            vmid = snapshot.get("vmid")
+            logged_vmid = vmid if isinstance(vmid, int) else None
+            self._record_access(parsed.path, uuid, HTTPStatus.OK, logged_vmid)
             if parsed.path == "/v1/usage/text":
                 body = render_usage_text(snapshot) + "\n"
                 self._send_text(HTTPStatus.OK, body)
@@ -63,6 +71,20 @@ def make_handler(config: AppConfig) -> type[BaseHTTPRequestHandler]:
 
         def log_message(self, format: str, *args: Any) -> None:
             return
+
+        def _record_access(self, request_path: str, uuid: str | None, status: HTTPStatus, vmid: int | None) -> None:
+            try:
+                append_access_log(
+                    config.api_access_log,
+                    max_entries=config.api_access_log_max_entries,
+                    ts=datetime.now(timezone.utc).astimezone(config.timezone),
+                    request_path=request_path,
+                    uuid=uuid,
+                    status=int(status),
+                    vmid=vmid,
+                )
+            except Exception:
+                return
 
         def _send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
