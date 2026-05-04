@@ -17,6 +17,8 @@ class TrafficShaper:
             self.runner = SubprocessCommandRunner(dry_run=self.dry_run)
 
     def apply(self, vmid: int, plan: TrafficPlan, rate_bps: int) -> None:
+        if rate_bps <= 0:
+            raise ValueError("rate_bps must be > 0")
         rate_kbit = max(1, rate_bps // 1000)
         self._ensure_ifb(f"ifbup{vmid}")
         self._ensure_ifb(f"ifbdn{vmid}")
@@ -66,8 +68,14 @@ class TrafficShaper:
             self._delete_redirect(hook.device, hook.hook)
         self._run(["tc", "qdisc", "del", "dev", f"ifbup{vmid}", "root"], check=False)
         self._run(["tc", "qdisc", "del", "dev", f"ifbdn{vmid}", "root"], check=False)
+        self._run(["ip", "link", "del", f"ifbup{vmid}"], check=False)
+        self._run(["ip", "link", "del", f"ifbdn{vmid}"], check=False)
 
     def is_applied(self, vmid: int, plan: TrafficPlan, rate_bps: int) -> bool:
+        if rate_bps <= 0:
+            raise ValueError("rate_bps must be > 0")
+        if not plan.upload_hooks or not plan.download_hooks:
+            return False
         rate_kbit = max(1, rate_bps // 1000)
         if not self._ifb_has_tbf(f"ifbup{vmid}", rate_kbit):
             return False

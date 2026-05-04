@@ -58,23 +58,36 @@ def _split_number_and_unit(raw: str) -> tuple[float, str]:
 
 
 def parse_byte_size(value: str | int) -> int:
+    if isinstance(value, bool):
+        raise ValueError("byte size must not be a boolean")
     if isinstance(value, int):
-        return value
-    amount, unit = _split_number_and_unit(value)
-    if unit in DECIMAL_BYTE_UNITS:
-        return int(amount * DECIMAL_BYTE_UNITS[unit])
-    if unit in IEC_BYTE_UNITS:
-        return int(amount * IEC_BYTE_UNITS[unit])
-    raise ValueError(f"unsupported byte unit: {unit}")
+        parsed = value
+    else:
+        amount, unit = _split_number_and_unit(value)
+        if unit in DECIMAL_BYTE_UNITS:
+            parsed = int(amount * DECIMAL_BYTE_UNITS[unit])
+        elif unit in IEC_BYTE_UNITS:
+            parsed = int(amount * IEC_BYTE_UNITS[unit])
+        else:
+            raise ValueError(f"unsupported byte unit: {unit}")
+    if parsed <= 0:
+        raise ValueError("byte size must be > 0")
+    return parsed
 
 
 def parse_rate_bps(value: str | int) -> int:
+    if isinstance(value, bool):
+        raise ValueError("rate must not be a boolean")
     if isinstance(value, int):
-        return value
-    amount, unit = _split_number_and_unit(value)
-    if unit in RATE_UNITS:
-        return int(amount * RATE_UNITS[unit])
-    raise ValueError(f"unsupported rate unit: {unit}")
+        parsed = value
+    else:
+        amount, unit = _split_number_and_unit(value)
+        if unit not in RATE_UNITS:
+            raise ValueError(f"unsupported rate unit: {unit}")
+        parsed = int(amount * RATE_UNITS[unit])
+    if parsed <= 0:
+        raise ValueError("rate must be > 0")
+    return parsed
 
 
 def validate_anchor_day(value: int) -> int:
@@ -83,11 +96,9 @@ def validate_anchor_day(value: int) -> int:
     return value
 
 
-def normalize_anchor_day(value: int) -> int:
-    return min(max(value, 1), 31)
-
-
 def parse_anchor_day(value: str | int) -> int:
+    if isinstance(value, bool):
+        raise argparse.ArgumentTypeError("anchor day must be an integer between 1 and 31")
     try:
         anchor_day = int(value)
     except (TypeError, ValueError) as exc:
@@ -99,6 +110,8 @@ def parse_anchor_day(value: str | int) -> int:
 
 
 def parse_vmid_ranges(values: list[str]) -> tuple[VmidRange, ...]:
+    if not values:
+        raise ValueError("at least one VMID range is required")
     ranges: list[VmidRange] = []
     for value in values:
         text = value.strip()

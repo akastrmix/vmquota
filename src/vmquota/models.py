@@ -53,7 +53,7 @@ class VmInfo:
                 download_hooks.append(SourceHook(device=fwln_name, hook="ingress"))
             elif nic.firewall and fwpr_name in interfaces:
                 download_hooks.append(SourceHook(device=fwpr_name, hook="ingress"))
-            elif tap_name in interfaces:
+            elif not nic.firewall and tap_name in interfaces:
                 download_hooks.append(SourceHook(device=tap_name, hook="egress"))
         return TrafficPlan(
             counter_devices=tuple(counter_devices),

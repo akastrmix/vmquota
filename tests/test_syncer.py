@@ -15,6 +15,7 @@ from vmquota.syncer import VmQuotaService
 
 class FakeInspector:
     def __init__(self) -> None:
+        self.interfaces = {"tap101i0", "fwpr101p0"}
         self.vm = VmInfo(
             vmid=101,
             name="vm101",
@@ -25,14 +26,17 @@ class FakeInspector:
             nics=(NicConfig(index=0, bridge="vmbr1", firewall=True, mac=None, model="virtio", raw=""),),
         )
 
-    def discover_vms(self) -> list[VmInfo]:
-        return [self.vm]
+    def discover_vms(self, vmid_filter=None) -> list[VmInfo]:
+        vms = [self.vm]
+        if vmid_filter is not None:
+            return [vm for vm in vms if vmid_filter(vm.vmid)]
+        return vms
 
     def get_vm(self, vmid: int) -> VmInfo | None:
         return self.vm if vmid == 101 else None
 
     def existing_interfaces(self) -> set[str]:
-        return {"tap101i0", "fwpr101p0"}
+        return set(self.interfaces)
 
     def read_interface_counters(self, device: str) -> tuple[int, int]:
         return (1000, 2000)
@@ -68,8 +72,11 @@ class MultiFakeInspector(FakeInspector):
             nics=(NicConfig(index=0, bridge="vmbr1", firewall=True, mac=None, model="virtio", raw=""),),
         )
 
-    def discover_vms(self) -> list[VmInfo]:
-        return [self.vm, self.vm2]
+    def discover_vms(self, vmid_filter=None) -> list[VmInfo]:
+        vms = [self.vm, self.vm2]
+        if vmid_filter is not None:
+            return [vm for vm in vms if vmid_filter(vm.vmid)]
+        return vms
 
     def get_vm(self, vmid: int) -> VmInfo | None:
         if vmid == 101:
@@ -247,6 +254,164 @@ class SyncerTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_sync_does_not_report_throttled_until_all_hooks_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=True,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+            )
+            db = StateDB(config.state_db)
+            inspector = FakeInspector()
+            shaper = FakeShaper()
+            try:
+                service = VmQuotaService(config=config, db=db, inspector=inspector, shaper=shaper)
+                now = datetime(2026, 3, 23, 4, 40, tzinfo=timezone.utc)
+                service.sync(now=now)
+                record = db.get_vm(101)
+                self.assertIsNotNone(record)
+                assert record is not None
+                record.total_bytes = 2
+                record.limit_bytes = 1
+                db.upsert_vm(record)
+
+                inspector.interfaces = {"tap101i0"}
+                service.sync(now=datetime(2026, 3, 23, 5, 0, tzinfo=timezone.utc))
+
+                missing_hooks = db.get_vm(101)
+                self.assertIsNotNone(missing_hooks)
+                assert missing_hooks is not None
+                self.assertFalse(missing_hooks.throttle_active)
+                self.assertNotIn(("apply", 101), shaper.actions)
+
+                inspector.interfaces = {"tap101i0", "fwpr101p0"}
+                service.sync(now=datetime(2026, 3, 23, 5, 1, tzinfo=timezone.utc))
+
+                ready = db.get_vm(101)
+                self.assertIsNotNone(ready)
+                assert ready is not None
+                self.assertTrue(ready.throttle_active)
+                self.assertIn(("apply", 101), shaper.actions)
+            finally:
+                db.close()
+
+    def test_manual_throttle_waits_for_complete_traffic_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=True,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+            )
+            db = StateDB(config.state_db)
+            inspector = FakeInspector()
+            shaper = FakeShaper()
+            try:
+                service = VmQuotaService(config=config, db=db, inspector=inspector, shaper=shaper)
+                now = datetime(2026, 3, 23, 4, 40, tzinfo=timezone.utc)
+                service.sync(now=now)
+
+                inspector.interfaces = {"tap101i0"}
+                updated = service.throttle_vm(101, "apply", now=datetime(2026, 3, 23, 5, 0, tzinfo=timezone.utc))
+
+                self.assertTrue(updated.manual_throttle)
+                self.assertFalse(updated.throttle_active)
+                self.assertNotIn(("apply", 101), shaper.actions)
+
+                inspector.interfaces = {"tap101i0", "fwpr101p0"}
+                service.sync(now=datetime(2026, 3, 23, 5, 1, tzinfo=timezone.utc))
+
+                ready = db.get_vm(101)
+                self.assertIsNotNone(ready)
+                assert ready is not None
+                self.assertTrue(ready.manual_throttle)
+                self.assertTrue(ready.throttle_active)
+                self.assertIn(("apply", 101), shaper.actions)
+            finally:
+                db.close()
+
+    def test_sync_preserves_counter_baseline_when_counter_device_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=True,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+            )
+            db = StateDB(config.state_db)
+            inspector = FakeInspector()
+            try:
+                service = VmQuotaService(config=config, db=db, inspector=inspector, shaper=FakeShaper())
+                now = datetime(2026, 3, 23, 4, 40, tzinfo=timezone.utc)
+                service.sync(now=now)
+                db.set_counter(101, "tap101i0", 10, 20, now)
+
+                inspector.interfaces = set()
+                service.sync(now=datetime(2026, 3, 23, 5, 0, tzinfo=timezone.utc))
+
+                self.assertEqual(db.get_counters(101)["tap101i0"], (10, 20))
+            finally:
+                db.close()
+
+    def test_sync_clears_ifb_when_stopped_vm_was_marked_throttled(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=True,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+            )
+            db = StateDB(config.state_db)
+            shaper = FakeShaper()
+            try:
+                service = VmQuotaService(config=config, db=db, inspector=StoppedFakeInspector(), shaper=shaper)
+                now = datetime(2026, 3, 23, 4, 40, tzinfo=timezone.utc)
+                service.sync(now=now)
+                record = db.get_vm(101)
+                self.assertIsNotNone(record)
+                assert record is not None
+                record.throttle_active = True
+                db.upsert_vm(record)
+
+                service.sync(now=datetime(2026, 3, 23, 5, 0, tzinfo=timezone.utc))
+
+                self.assertIn(("clear", 101), shaper.actions)
+                cleared = db.get_vm(101)
+                self.assertIsNotNone(cleared)
+                assert cleared is not None
+                self.assertFalse(cleared.throttle_active)
+            finally:
+                db.close()
+
     def test_failed_sync_does_not_advance_counter_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             config = AppConfig(
@@ -391,6 +556,30 @@ class SyncerTests(unittest.TestCase):
                 self.assertTrue(updated.manual_throttle)
                 self.assertFalse(updated.throttle_active)
                 self.assertEqual(shaper.actions, [])
+            finally:
+                db.close()
+
+    def test_throttle_rejects_unknown_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=9527,
+                enforce_shaping=True,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+            )
+            db = StateDB(config.state_db)
+            try:
+                service = VmQuotaService(config=config, db=db, inspector=FakeInspector(), shaper=FakeShaper())
+                service.sync(now=datetime(2026, 3, 23, 4, 40, tzinfo=timezone.utc))
+                with self.assertRaisesRegex(ValueError, "throttle action must be apply or clear"):
+                    service.throttle_vm(101, "disable", now=datetime(2026, 3, 23, 5, 0, tzinfo=timezone.utc))
             finally:
                 db.close()
 

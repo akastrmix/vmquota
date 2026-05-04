@@ -24,6 +24,14 @@ class PveTests(unittest.TestCase):
         self.assertEqual([hook.device for hook in plan.upload_hooks], ["tap101i0", "tap101i1"])
         self.assertEqual([hook.device for hook in plan.download_hooks], ["fwln101i0", "fwln101i1"])
 
+    def test_firewall_nic_does_not_use_tap_egress_without_fw_hook(self) -> None:
+        vm = PveInspector._parse_vm_config(101, SAMPLE_CONFIG, "running")
+        plan = vm.build_traffic_plan({"tap101i0", "tap101i1"})
+
+        self.assertEqual(plan.counter_devices, ("tap101i0", "tap101i1"))
+        self.assertEqual([hook.device for hook in plan.upload_hooks], ["tap101i0", "tap101i1"])
+        self.assertEqual(plan.download_hooks, ())
+
     def test_discover_vms_from_realistic_config_and_sysfs_layout(self) -> None:
         class FakeRunner:
             def __init__(self) -> None:
@@ -57,6 +65,66 @@ class PveTests(unittest.TestCase):
             self.assertEqual(inspector.existing_interfaces(), {"tap101i0"})
             self.assertEqual(inspector.read_interface_counters("tap101i0"), (123, 456))
             self.assertEqual(runner.calls, [("qm", "list")])
+
+    def test_qm_list_rejects_malformed_lines(self) -> None:
+        class FakeRunner:
+            def run(self, args: list[str], *, check: bool = False, error_message: str = "command failed") -> CommandResult:
+                return CommandResult(args=tuple(args), returncode=0, stdout="VMID NAME STATUS\nmalformed\n", stderr="")
+
+        inspector = PveInspector(runner=FakeRunner())
+
+        with self.assertRaisesRegex(ValueError, "malformed qm list line"):
+            inspector.list_statuses()
+
+    def test_discover_vms_rejects_missing_qm_status(self) -> None:
+        class FakeRunner:
+            def run(self, args: list[str], *, check: bool = False, error_message: str = "command failed") -> CommandResult:
+                return CommandResult(args=tuple(args), returncode=0, stdout="VMID NAME STATUS\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            config_dir = Path(tempdir) / "qemu-server"
+            config_dir.mkdir(parents=True)
+            (config_dir / "101.conf").write_text(SAMPLE_CONFIG, encoding="utf-8")
+            inspector = PveInspector(config_dir=config_dir, runner=FakeRunner())
+
+            with self.assertRaisesRegex(ValueError, "VM 101 missing from qm list"):
+                inspector.discover_vms()
+
+    def test_discover_vms_filters_before_strict_config_parse(self) -> None:
+        class FakeRunner:
+            def run(self, args: list[str], *, check: bool = False, error_message: str = "command failed") -> CommandResult:
+                return CommandResult(
+                    args=tuple(args),
+                    returncode=0,
+                    stdout=(
+                        "VMID NAME STATUS\n"
+                        "101 vm101 running\n"
+                        "200 lab200 running\n"
+                    ),
+                    stderr="",
+                )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            config_dir = Path(tempdir) / "qemu-server"
+            config_dir.mkdir(parents=True)
+            (config_dir / "101.conf").write_text(SAMPLE_CONFIG, encoding="utf-8")
+            (config_dir / "200.conf").write_text(
+                "name: off-scope\nnet0: virtio=AA:BB:CC:DD:EE:FF,firewall=1\n",
+                encoding="utf-8",
+            )
+            inspector = PveInspector(config_dir=config_dir, runner=FakeRunner())
+
+            vms = inspector.discover_vms(lambda vmid: vmid == 101)
+
+            self.assertEqual([vm.vmid for vm in vms], [101])
+
+    def test_parse_nic_rejects_incomplete_net_config(self) -> None:
+        with self.assertRaisesRegex(ValueError, "net0: missing bridge"):
+            PveInspector._parse_vm_config(101, "net0: virtio=AA:BB:CC:DD:EE:FF,firewall=1\n", "running")
+
+    def test_parse_nic_rejects_invalid_firewall_flag(self) -> None:
+        with self.assertRaisesRegex(ValueError, "net0: firewall must be 0 or 1"):
+            PveInspector._parse_vm_config(101, "net0: virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr1,firewall=yes\n", "running")
 
 
 if __name__ == "__main__":

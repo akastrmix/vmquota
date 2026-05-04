@@ -7,13 +7,19 @@ import json
 import sqlite3
 
 from .models import ManagedVm, VmEvent
-from .parsing import normalize_anchor_day
+from .parsing import validate_anchor_day
 
 
 def _as_datetime(value: str | None) -> datetime | None:
     if value is None:
         return None
     return datetime.fromisoformat(value)
+
+
+def _as_bool_flag(value: int, name: str) -> bool:
+    if value not in (0, 1):
+        raise ValueError(f"{name} must be 0 or 1")
+    return bool(value)
 
 
 class StateDB:
@@ -251,13 +257,13 @@ class StateDB:
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
             last_seen_at=datetime.fromisoformat(row["last_seen_at"]),
-            anchor_day=normalize_anchor_day(row["anchor_day"]),
+            anchor_day=validate_anchor_day(row["anchor_day"]),
             period_start=datetime.fromisoformat(row["period_start"]),
             next_reset_at=datetime.fromisoformat(row["next_reset_at"]),
             limit_bytes=row["limit_bytes"],
             throttle_bps=row["throttle_bps"],
-            manual_throttle=bool(row["manual_throttle"]),
-            throttle_active=bool(row["throttle_active"]),
+            manual_throttle=_as_bool_flag(row["manual_throttle"], "manual_throttle"),
+            throttle_active=_as_bool_flag(row["throttle_active"], "throttle_active"),
             total_bytes=row["total_bytes"],
             last_sync_at=_as_datetime(row["last_sync_at"]),
         )
@@ -279,15 +285,10 @@ class StateDB:
         if not details_text:
             details = None
         else:
-            try:
-                parsed = json.loads(details_text)
-            except json.JSONDecodeError:
-                details = {"raw": details_text}
-            else:
-                if isinstance(parsed, dict):
-                    details = parsed
-                else:
-                    details = {"value": parsed}
+            parsed = json.loads(details_text)
+            if not isinstance(parsed, dict):
+                raise ValueError("events.details must be a JSON object")
+            details = parsed
         return VmEvent(
             vmid=vmid,
             bios_uuid=row["bios_uuid"],

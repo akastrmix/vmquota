@@ -76,7 +76,7 @@ class VmQuotaService:
     ) -> tuple[list[ManagedVm], list[int]]:
         now = now or utc_now()
         selected = parse_vmid_ranges([vmid_range])[0]
-        discovered = {vm.vmid for vm in self.inspector.discover_vms() if selected.contains(vm.vmid) and not vm.template}
+        discovered = {vm.vmid for vm in self.inspector.discover_vms(selected.contains) if not vm.template}
         enrolled = {vm.vmid for vm in self.db.list_vms() if selected.contains(vm.vmid)}
         vmids = sorted(discovered | enrolled)
         updated: list[ManagedVm] = []
@@ -112,6 +112,8 @@ class VmQuotaService:
         return plan.record
 
     def throttle_vm(self, vmid: int, action: str, now: datetime | None = None) -> ManagedVm:
+        if action not in {"apply", "clear"}:
+            raise ValueError("throttle action must be apply or clear")
         now = now or utc_now()
         plan = self._plan_manual_throttle(vmid, action=action, now=now)
         self._execute_plan(plan)
@@ -238,10 +240,13 @@ class VmQuotaService:
             if vm.status == "running":
                 interfaces = self.inspector.existing_interfaces()
                 traffic_plan = vm.build_traffic_plan(interfaces)
-                plan.shaping_actions.append(
-                    ShapingAction(action="apply", vmid=vmid, plan=traffic_plan, rate_bps=plan.record.throttle_bps)
-                )
-                plan.record.throttle_active = True
+                if self._traffic_plan_ready(vm, traffic_plan):
+                    plan.shaping_actions.append(
+                        ShapingAction(action="apply", vmid=vmid, plan=traffic_plan, rate_bps=plan.record.throttle_bps)
+                    )
+                    plan.record.throttle_active = True
+                else:
+                    plan.record.throttle_active = False
             else:
                 plan.record.throttle_active = False
         else:
@@ -285,11 +290,10 @@ class VmQuotaService:
 
     def _managed_vms(self) -> list[VmInfo]:
         managed: list[VmInfo] = []
-        for vm in self.inspector.discover_vms():
+        for vm in self.inspector.discover_vms(lambda vmid: vmid_in_ranges(vmid, self.config.vmid_ranges)):
             if vm.template:
                 continue
-            if vmid_in_ranges(vm.vmid, self.config.vmid_ranges):
-                managed.append(vm)
+            managed.append(vm)
         return managed
 
     def _ensure_record(self, vm: VmInfo, now: datetime) -> tuple[ManagedVm, bool, list[VmEvent]]:
@@ -392,6 +396,9 @@ class VmQuotaService:
             record.last_sync_at = now
             return record, None
         traffic_plan = vm.build_traffic_plan(interfaces)
+        if len(traffic_plan.counter_devices) != len(vm.nics):
+            record.last_sync_at = now
+            return record, None
         previous = {} if ignore_previous_counters else self.db.get_counters(vm.vmid)
         delta_total = 0
         sampled_counters: dict[str, tuple[int, int]] = {}
@@ -422,6 +429,9 @@ class VmQuotaService:
         rules_active: bool,
     ) -> None:
         should_throttle = self._desired_throttle(vm, plan.record)
+        if should_throttle and not self._traffic_plan_ready(vm, traffic_plan):
+            plan.record.throttle_active = False
+            return
         if should_throttle and not rules_active:
             plan.shaping_actions.append(
                 ShapingAction(action="apply", vmid=vm.vmid, plan=traffic_plan, rate_bps=plan.record.throttle_bps)
@@ -439,7 +449,7 @@ class VmQuotaService:
             )
             plan.messages.append(f"VM {vm.vmid}: throttle applied at {plan.record.throttle_bps} bps")
             return
-        if not should_throttle and rules_active:
+        if not should_throttle and (rules_active or plan.record.throttle_active):
             plan.shaping_actions.append(
                 ShapingAction(action="clear", vmid=vm.vmid, plan=traffic_plan, rate_bps=plan.record.throttle_bps)
             )
@@ -457,6 +467,17 @@ class VmQuotaService:
             plan.messages.append(f"VM {vm.vmid}: throttle cleared")
             return
         plan.record.throttle_active = should_throttle and rules_active
+
+    @staticmethod
+    def _traffic_plan_ready(vm: VmInfo, traffic_plan: TrafficPlan) -> bool:
+        expected_nics = len(vm.nics)
+        if expected_nics == 0:
+            return False
+        return (
+            len(traffic_plan.counter_devices) == expected_nics
+            and len(traffic_plan.upload_hooks) == expected_nics
+            and len(traffic_plan.download_hooks) == expected_nics
+        )
 
 
 def _counter_delta(previous: int, current: int) -> int:

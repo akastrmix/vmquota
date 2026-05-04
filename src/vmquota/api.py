@@ -36,8 +36,12 @@ def make_handler(config: AppConfig) -> type[BaseHTTPRequestHandler]:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
 
-            query = parse_qs(parsed.query)
-            uuid = query.get("uuid", [""])[0].strip()
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            uuid_values = query.get("uuid", [])
+            if len(uuid_values) != 1:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "missing uuid" if not uuid_values else "duplicate uuid"})
+                return
+            uuid = uuid_values[0].strip()
             if not uuid:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "missing uuid"})
                 return

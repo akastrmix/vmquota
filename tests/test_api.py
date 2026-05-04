@@ -1,10 +1,13 @@
 from datetime import datetime, timezone
+from http.server import ThreadingHTTPServer
+import http.client
 from pathlib import Path
+import threading
 import tempfile
 import unittest
 from zoneinfo import ZoneInfo
 
-from vmquota.api import lookup_snapshot
+from vmquota.api import lookup_snapshot, make_handler
 from vmquota.config import AppConfig
 from vmquota.db import StateDB
 from vmquota.models import ManagedVm
@@ -53,6 +56,47 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(snapshot["vmid"], 101)
             self.assertEqual(snapshot["usage_bytes"], 100)
             self.assertEqual(snapshot["usage_percent_text"], "10.00%")
+
+    def test_usage_endpoint_rejects_duplicate_uuid_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = AppConfig(
+                path=Path(tempdir) / "config.toml",
+                timezone_name="Asia/Shanghai",
+                timezone=ZoneInfo("Asia/Shanghai"),
+                state_db=Path(tempdir) / "state.sqlite",
+                api_bind_host="127.0.0.1",
+                api_bind_port=0,
+                enforce_shaping=False,
+                auto_enroll=True,
+                vmid_ranges=parse_vmid_ranges(["101-110"]),
+                default_limit_bytes=2_000_000_000_000,
+                default_throttle_bps=2_000_000,
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(config))
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+                conn.request("GET", "/v1/usage?uuid=a&uuid=b")
+                response = conn.getresponse()
+                body = response.read().decode("utf-8")
+                conn.close()
+
+                self.assertEqual(response.status, 400)
+                self.assertIn("duplicate uuid", body)
+
+                conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+                conn.request("GET", "/v1/usage?uuid=a&uuid=")
+                response = conn.getresponse()
+                body = response.read().decode("utf-8")
+                conn.close()
+
+                self.assertEqual(response.status, 400)
+                self.assertIn("duplicate uuid", body)
+            finally:
+                server.shutdown()
+                thread.join()
+                server.server_close()
 
 
 if __name__ == "__main__":

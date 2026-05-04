@@ -50,13 +50,6 @@ cp "$SCRIPT_DIR/README.md" "$APP_ROOT/README.md"
 
 if [ ! -f "$CONFIG_DIR/config.toml" ]; then
   cp "$SCRIPT_DIR/examples/config.toml" "$CONFIG_DIR/config.toml"
-elif ! grep -q '^\[api\]' "$CONFIG_DIR/config.toml"; then
-  cat >> "$CONFIG_DIR/config.toml" <<'EOF'
-
-[api]
-bind_host = "10.200.0.1"
-bind_port = 9527
-EOF
 fi
 
 cat > "$BIN_DIR/vmquota" <<'SH'

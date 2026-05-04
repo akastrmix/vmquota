@@ -47,12 +47,15 @@
 - 下载方向：
   - 当 `firewall=1` 时，优先使用 `fwln<vmid>i<index> ingress`
   - 如果 `fwln` 不存在，再回退到 `fwpr<vmid>p<index>`
-  - 如果相关防火墙接口都不存在，才退回 `tap... egress`
+  - 如果 `fwln` 和 `fwpr` 都不存在，视为下载 hook 未完整发现，等待下一轮 `sync`
+  - 只有 `firewall=0` 的 NIC 才使用 `tap... egress`
+- 只有运行中 VM 的计数设备、上传 hook、下载 hook 都完整发现后，才允许认为限速已应用；接口缺失时应保持未限速状态并等待下一轮 `sync` 重试
 
 ## 7. 自动限速与手动限速
 
 - 自动限速由 `enforce_shaping` 控制
 - 当自动限速开启且 VM 超额时，会自动下发双向限速
+- 解除限速必须删除本 VM 的 redirect filter、IFB qdisc 和 `ifbup/ifbdn` 运行时设备
 - 手动 `vmquota throttle <vmid> --apply` 是**持久 override**
 - 手动 override 不会被下一轮 `sync` 自动清掉
 - 只有显式 `vmquota throttle <vmid> --clear` 才会撤销 override

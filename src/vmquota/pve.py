@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from .models import NicConfig, VmInfo
@@ -30,24 +31,31 @@ class PveInspector:
                 continue
             parts = line.split()
             if len(parts) < 3:
-                continue
+                raise ValueError(f"malformed qm list line: {line}")
             statuses[int(parts[0])] = parts[2]
         return statuses
 
-    def discover_vms(self) -> list[VmInfo]:
+    def discover_vms(self, vmid_filter: Callable[[int], bool] | None = None) -> list[VmInfo]:
         statuses = self.list_statuses()
         vms: list[VmInfo] = []
         for path in sorted(self.config_dir.glob("*.conf")):
             vmid = int(path.stem)
+            if vmid_filter is not None and not vmid_filter(vmid):
+                continue
             content = path.read_text(encoding="utf-8")
-            vms.append(self._parse_vm_config(vmid, content, statuses.get(vmid, "unknown")))
+            if vmid not in statuses:
+                raise ValueError(f"VM {vmid} missing from qm list")
+            vms.append(self._parse_vm_config(vmid, content, statuses[vmid]))
         return vms
 
     def get_vm(self, vmid: int) -> VmInfo | None:
         path = self.config_dir / f"{vmid}.conf"
         if not path.exists():
             return None
-        status = self.list_statuses().get(vmid, "unknown")
+        statuses = self.list_statuses()
+        if vmid not in statuses:
+            raise ValueError(f"VM {vmid} missing from qm list")
+        status = statuses[vmid]
         return self._parse_vm_config(vmid, path.read_text(encoding="utf-8"), status)
 
     def existing_interfaces(self) -> set[str]:
@@ -77,6 +85,8 @@ class PveInspector:
             if key == "name":
                 name = value
             elif key == "template":
+                if value not in {"0", "1"}:
+                    raise ValueError(f"VM {vmid}: template must be 0 or 1")
                 template = value == "1"
             elif key == "tags":
                 tags = tuple(sorted(part.strip() for part in value.split(";") if part.strip()))
@@ -115,7 +125,13 @@ class PveInspector:
             elif key == "bridge":
                 bridge = value
             elif key == "firewall":
+                if value not in {"0", "1"}:
+                    raise ValueError(f"net{index}: firewall must be 0 or 1")
                 firewall = value == "1"
+        if model is None or mac is None:
+            raise ValueError(f"net{index}: missing NIC model and MAC")
+        if bridge is None:
+            raise ValueError(f"net{index}: missing bridge")
         return NicConfig(
             index=index,
             bridge=bridge,
