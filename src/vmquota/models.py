@@ -107,10 +107,11 @@ class VmEvent:
 
 @dataclass(frozen=True, slots=True)
 class ShapingAction:
-    action: Literal["apply", "clear"]
+    action: Literal["apply", "clear", "clear-runtime"]
     vmid: int
     plan: TrafficPlan
     rate_bps: int
+    interfaces: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

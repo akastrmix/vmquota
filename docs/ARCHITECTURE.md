@@ -15,6 +15,7 @@
 - 模板 VM 不纳入计费
 - 实例身份优先使用 BIOS UUID
 - 如果同一个 VMID 被删除后重建，只要 BIOS UUID 变化，就视为新实例重新建档
+- BIOS UUID 是实例身份，不是防作弊安全凭据；拥有 PVE 配置权限等同于可以重置实例身份
 
 ## 3. 计费口径
 
@@ -28,7 +29,7 @@
 - 默认月账期锚点是“首次发现当天”
 - `period_start` 和 `next_reset_at` 统一按配置时区计算，再以 UTC 存储
 - 每次跨过 `next_reset_at` 时，进入新账期并清零当前累计
-- 手动 `reset` 会清流量
+- 手动 `reset` 默认等同于 `--usage-only`，只清当前流量，不修改重置日
 - 手动 `reanchor` 会同时修改锚点日并从当前时刻开始新账期
 - `anchor_day` / `reanchor_day` 只允许 `1-31`
 
@@ -65,6 +66,7 @@
 
 - 宿主机只读 API 默认绑定 `10.200.0.1:9527`
 - `traffic` 通过 BIOS UUID 查询宿主机 API
+- guest 只能读取自身 BIOS UUID；UUID 的可信边界在宿主机/PVE 配置侧
 - API 查询记录默认写入 `/var/lib/vmquota/api-access.jsonl`，只保留最近配置条数，不写入 `events`
 - `traffic --brief` 返回 4 列：
 

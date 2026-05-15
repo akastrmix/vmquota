@@ -114,6 +114,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - 下载方向整形在 `firewall=1` 时优先挂到 `fwln<vmid>i<index>`，没有 `fwln` 才回退到 `fwpr<vmid>p<index>`。
 - `enforce_shaping` 控制是否自动按超额状态限速。
 - 手动 `throttle --apply` 是持久 override，不会被下一轮 `sync` 自动清掉。
+- BIOS UUID 是实例身份，不是防作弊凭据；拥有 PVE 配置权限的人可以改 UUID 并触发重新建档。
 - 模板更新和 `traffic` 分发必须看 `docs/TEMPLATE.md`。
 
 ## 文档

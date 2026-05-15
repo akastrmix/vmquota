@@ -101,6 +101,30 @@ class ShapingTests(unittest.TestCase):
         self.assertIn(("ip", "link", "del", "ifbup101"), runner.calls)
         self.assertIn(("ip", "link", "del", "ifbdn101"), runner.calls)
 
+    def test_clear_vmid_runtime_covers_all_current_vm_interfaces(self) -> None:
+        class RecordingRunner:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, ...]] = []
+
+            def run(self, args: list[str], *, check: bool = False, error_message: str = "command failed") -> CommandResult:
+                self.calls.append(tuple(args))
+                return CommandResult(args=tuple(args), returncode=0, stdout="", stderr="")
+
+        runner = RecordingRunner()
+        shaper = TrafficShaper(runner=runner)
+
+        shaper.clear_vmid_runtime(
+            101,
+            {"tap101i0", "fwln101i0", "fwpr101p0", "tap101iabc", "tap102i0"},
+        )
+
+        self.assertIn(("tc", "filter", "delete", "dev", "tap101i0", "ingress", "pref", "49152"), runner.calls)
+        self.assertIn(("tc", "filter", "delete", "dev", "tap101i0", "egress", "pref", "49152"), runner.calls)
+        self.assertIn(("tc", "filter", "delete", "dev", "fwln101i0", "ingress", "pref", "49152"), runner.calls)
+        self.assertIn(("tc", "filter", "delete", "dev", "fwpr101p0", "ingress", "pref", "49152"), runner.calls)
+        self.assertNotIn(("tc", "filter", "delete", "dev", "tap101iabc", "ingress", "pref", "49152"), runner.calls)
+        self.assertNotIn(("tc", "filter", "delete", "dev", "tap102i0", "ingress", "pref", "49152"), runner.calls)
+
     def test_clear_raises_when_tc_command_is_missing(self) -> None:
         class MissingCommandRunner:
             def run(self, args: list[str], *, check: bool = False, error_message: str = "command failed") -> CommandResult:

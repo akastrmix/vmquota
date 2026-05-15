@@ -66,6 +66,17 @@ class PresentationTests(unittest.TestCase):
 
         self.assertEqual(event_summary(reset_event), "cleared 1.02 KB, mode=usage-only")
 
+        recreate_event = VmEvent(
+            vmid=101,
+            bios_uuid="uuid-b",
+            ts=datetime(2026, 3, 24, 1, 0, tzinfo=timezone.utc),
+            kind="recreate",
+            message="Detected recreated VM",
+            details={"old_uuid": "uuid-a", "new_uuid": "uuid-b"},
+        )
+
+        self.assertEqual(event_summary(recreate_event), "uuid uuid-a -> uuid-b")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .models import TrafficPlan
+from .models import SourceHook, TrafficPlan
 from .system import CommandResult, CommandRunner, SubprocessCommandRunner
 
 
@@ -71,6 +71,9 @@ class TrafficShaper:
         self._run(["ip", "link", "del", f"ifbup{vmid}"], check=False)
         self._run(["ip", "link", "del", f"ifbdn{vmid}"], check=False)
 
+    def clear_vmid_runtime(self, vmid: int, interfaces: set[str]) -> None:
+        self.clear(vmid, self._vmid_cleanup_plan(vmid, interfaces))
+
     def is_applied(self, vmid: int, plan: TrafficPlan, rate_bps: int) -> bool:
         if rate_bps <= 0:
             raise ValueError("rate_bps must be > 0")
@@ -95,6 +98,27 @@ class TrafficShaper:
         if self._last_returncode != 0:
             self._run(["ip", "link", "add", name, "type", "ifb"])
         self._run(["ip", "link", "set", name, "up"])
+
+    @staticmethod
+    def _vmid_cleanup_plan(vmid: int, interfaces: set[str]) -> TrafficPlan:
+        upload_hooks: list[SourceHook] = []
+        download_hooks: list[SourceHook] = []
+        tap_prefix = f"tap{vmid}i"
+        fwln_prefix = f"fwln{vmid}i"
+        fwpr_prefix = f"fwpr{vmid}p"
+        for device in sorted(interfaces):
+            if device.startswith(tap_prefix) and device[len(tap_prefix) :].isdigit():
+                upload_hooks.append(SourceHook(device=device, hook="ingress"))
+                download_hooks.append(SourceHook(device=device, hook="egress"))
+            elif device.startswith(fwln_prefix) and device[len(fwln_prefix) :].isdigit():
+                download_hooks.append(SourceHook(device=device, hook="ingress"))
+            elif device.startswith(fwpr_prefix) and device[len(fwpr_prefix) :].isdigit():
+                download_hooks.append(SourceHook(device=device, hook="ingress"))
+        return TrafficPlan(
+            counter_devices=(),
+            upload_hooks=tuple(upload_hooks),
+            download_hooks=tuple(download_hooks),
+        )
 
     def _install_redirect(self, device: str, hook: str, target_ifb: str) -> None:
         self._ensure_clsact(device)

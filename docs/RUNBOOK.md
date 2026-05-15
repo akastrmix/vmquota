@@ -23,6 +23,7 @@
 - `enforce_shaping = false` 时，只统计，不自动限速。
 - 手动 `throttle --apply` 是持久 override；只有显式 `--clear` 才撤销。
 - `traffic` 依赖宿主机 API 和 VM BIOS UUID，不是常驻 agent。
+- BIOS UUID 是实例身份，不是防作弊凭据；拥有 PVE 配置权限的人可以改 UUID，从而触发重新建档。
 
 ## 2. 日常速查
 
@@ -139,6 +140,8 @@ vmquota set-range 101-105 --anchor-day 20
 ```bash
 vmquota reset 101 --usage-only
 ```
+
+不带 reanchor 参数的 `vmquota reset 101` 与 `--usage-only` 等价。
 
 把重置日改成今天：
 
@@ -296,6 +299,7 @@ tc filter show dev fwln101i0 ingress
 ### 删除重建后重新开始计费
 
 `vmquota` 按 BIOS UUID 识别实例。同一个 VMID 删除后重建，只要 BIOS UUID 变化，就会被当作新实例重新建档。
+重新建档会重置本 VMID 的 vmquota 策略、账期、累计流量和手动限速 override，并清理该 VMID 当前可见的 `tc + IFB` 运行时限速规则。
 
 ### VM 内 `traffic` 查不到
 

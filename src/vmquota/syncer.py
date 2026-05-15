@@ -105,7 +105,8 @@ class VmQuotaService:
         reanchor_day: int | None = None,
         now: datetime | None = None,
     ) -> ManagedVm:
-        del usage_only
+        if usage_only and (reanchor_today or reanchor_day is not None):
+            raise ValueError("usage_only cannot be combined with reanchor options")
         now = now or utc_now()
         plan = self._plan_reset(vmid, now=now, reanchor_today=reanchor_today, reanchor_day=reanchor_day)
         self._execute_plan(plan)
@@ -123,7 +124,9 @@ class VmQuotaService:
         record, clear_counters, events = self._ensure_record(vm, now)
         plan = VmMutationPlan(record=record, clear_counters=clear_counters, events=events)
         traffic_plan, rules_active = self._runtime_snapshot(vm, interfaces, record.throttle_bps)
-        rules_active = self._plan_period_roll(plan, vm, now, traffic_plan, rules_active)
+        if self._plan_recreate_cleanup(plan, vm.vmid, interfaces):
+            rules_active = False
+        rules_active = self._plan_period_roll(plan, vm, now, interfaces, rules_active)
         plan.record, sampled_counters = self._sample_usage(
             vm,
             plan.record,
@@ -136,7 +139,7 @@ class VmQuotaService:
         plan.record.name = vm.name
         plan.record.last_seen_at = now
         plan.record.updated_at = now
-        self._plan_shaping_reconciliation(plan, vm, now, traffic_plan, rules_active)
+        self._plan_shaping_reconciliation(plan, vm, now, interfaces, traffic_plan, rules_active)
         return plan
 
     def _plan_policy_update(
@@ -177,7 +180,9 @@ class VmQuotaService:
         else:
             interfaces = self.inspector.existing_interfaces()
             traffic_plan, rules_active = self._runtime_snapshot(vm, interfaces, plan.record.throttle_bps)
-            self._plan_shaping_reconciliation(plan, vm, now, traffic_plan, rules_active)
+            if self._plan_recreate_cleanup(plan, vmid, interfaces):
+                rules_active = False
+            self._plan_shaping_reconciliation(plan, vm, now, interfaces, traffic_plan, rules_active)
         details: dict[str, object] = {
             "old": old_policy,
             "new": {
@@ -245,7 +250,9 @@ class VmQuotaService:
         else:
             interfaces = self.inspector.existing_interfaces()
             traffic_plan, rules_active = self._runtime_snapshot(vm, interfaces, plan.record.throttle_bps)
-            self._plan_shaping_reconciliation(plan, vm, now, traffic_plan, rules_active)
+            if self._plan_recreate_cleanup(plan, vmid, interfaces):
+                rules_active = False
+            self._plan_shaping_reconciliation(plan, vm, now, interfaces, traffic_plan, rules_active)
         plan.events.append(
             VmEvent(
                 vmid=vmid,
@@ -277,10 +284,11 @@ class VmQuotaService:
         if not vm:
             raise ValueError(f"VM {vmid} does not exist on this host")
         plan = VmMutationPlan(record=record, clear_counters=clear_counters, events=events)
+        interfaces = self.inspector.existing_interfaces()
+        self._plan_recreate_cleanup(plan, vmid, interfaces)
         if action == "apply":
             plan.record.manual_throttle = True
             if vm.status == "running":
-                interfaces = self.inspector.existing_interfaces()
                 traffic_plan = vm.build_traffic_plan(interfaces)
                 if self._traffic_plan_ready(vm, traffic_plan):
                     plan.shaping_actions.append(
@@ -293,12 +301,7 @@ class VmQuotaService:
                 plan.record.throttle_active = False
         else:
             plan.record.manual_throttle = False
-            if vm.status == "running":
-                interfaces = self.inspector.existing_interfaces()
-                traffic_plan = vm.build_traffic_plan(interfaces)
-                plan.shaping_actions.append(
-                    ShapingAction(action="clear", vmid=vmid, plan=traffic_plan, rate_bps=plan.record.throttle_bps)
-                )
+            self._append_runtime_clear(plan, vmid, interfaces)
             plan.record.throttle_active = False
         plan.record.updated_at = now
         plan.events.append(
@@ -327,8 +330,12 @@ class VmQuotaService:
     def _execute_shaping_action(self, action: ShapingAction) -> None:
         if action.action == "apply":
             self.shaper.apply(action.vmid, action.plan, action.rate_bps)
-        else:
+        elif action.action == "clear-runtime":
+            self.shaper.clear_vmid_runtime(action.vmid, set(action.interfaces))
+        elif action.action == "clear":
             self.shaper.clear(action.vmid, action.plan)
+        else:
+            raise ValueError(f"unknown shaping action: {action.action}")
 
     def _managed_vms(self) -> list[VmInfo]:
         managed: list[VmInfo] = []
@@ -367,9 +374,46 @@ class VmQuotaService:
             ts=now,
             kind="enroll" if current is None else "recreate",
             message="Enrolled VM" if current is None else "Detected recreated VM",
-            details={"uuid": bios_uuid},
+            details={"uuid": bios_uuid} if current is None else self._recreate_event_details(current, bios_uuid),
         )
         return record, True, [event]
+
+    @staticmethod
+    def _recreate_event_details(previous: ManagedVm, new_uuid: str) -> dict[str, object]:
+        return {
+            "old_uuid": previous.bios_uuid,
+            "new_uuid": new_uuid,
+            "old_record": {
+                "total_bytes": previous.total_bytes,
+                "limit_bytes": previous.limit_bytes,
+                "throttle_bps": previous.throttle_bps,
+                "anchor_day": previous.anchor_day,
+                "manual_throttle": previous.manual_throttle,
+                "throttle_active": previous.throttle_active,
+                "period_start": previous.period_start.isoformat(),
+                "next_reset_at": previous.next_reset_at.isoformat(),
+                "last_sync_at": previous.last_sync_at.isoformat() if previous.last_sync_at else None,
+            },
+        }
+
+    def _plan_recreate_cleanup(self, plan: VmMutationPlan, vmid: int, interfaces: set[str]) -> bool:
+        if not any(event.kind == "recreate" for event in plan.events):
+            return False
+        self._append_runtime_clear(plan, vmid, interfaces)
+        return True
+
+    def _append_runtime_clear(self, plan: VmMutationPlan, vmid: int, interfaces: set[str]) -> None:
+        if any(action.action == "clear-runtime" and action.vmid == vmid for action in plan.shaping_actions):
+            return
+        plan.shaping_actions.append(
+            ShapingAction(
+                action="clear-runtime",
+                vmid=vmid,
+                plan=TrafficPlan(counter_devices=(), upload_hooks=(), download_hooks=()),
+                rate_bps=plan.record.throttle_bps,
+                interfaces=tuple(sorted(interfaces)),
+            )
+        )
 
     def _require_record_state(self, vmid: int, now: datetime) -> tuple[ManagedVm, bool, list[VmEvent]]:
         record = self.db.get_vm(vmid)
@@ -395,15 +439,13 @@ class VmQuotaService:
         plan: VmMutationPlan,
         vm: VmInfo,
         now: datetime,
-        traffic_plan: TrafficPlan,
+        interfaces: set[str],
         rules_active: bool,
     ) -> bool:
         if now < plan.record.next_reset_at:
             return rules_active
         if rules_active and vm.status == "running" and self.config.enforce_shaping:
-            plan.shaping_actions.append(
-                ShapingAction(action="clear", vmid=vm.vmid, plan=traffic_plan, rate_bps=plan.record.throttle_bps)
-            )
+            self._append_runtime_clear(plan, vm.vmid, interfaces)
             rules_active = False
         previous_total_bytes = plan.record.total_bytes
         previous_period_start = plan.record.period_start
@@ -482,6 +524,7 @@ class VmQuotaService:
         plan: VmMutationPlan,
         vm: VmInfo,
         now: datetime,
+        interfaces: set[str],
         traffic_plan: TrafficPlan,
         rules_active: bool,
     ) -> None:
@@ -507,9 +550,7 @@ class VmQuotaService:
             plan.messages.append(f"VM {vm.vmid}: throttle applied at {plan.record.throttle_bps} bps")
             return
         if not should_throttle and (rules_active or plan.record.throttle_active):
-            plan.shaping_actions.append(
-                ShapingAction(action="clear", vmid=vm.vmid, plan=traffic_plan, rate_bps=plan.record.throttle_bps)
-            )
+            self._append_runtime_clear(plan, vm.vmid, interfaces)
             plan.record.throttle_active = False
             plan.events.append(
                 VmEvent(

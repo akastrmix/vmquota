@@ -102,6 +102,11 @@ def event_summary(event: VmEvent) -> str | None:
         if isinstance(mode, str):
             summary = f"{summary}, mode={mode}"
         return summary
+    if event.kind == "recreate":
+        old_uuid = details.get("old_uuid")
+        new_uuid = details.get("new_uuid")
+        if isinstance(old_uuid, str) and isinstance(new_uuid, str):
+            return f"uuid {old_uuid} -> {new_uuid}"
     if event.kind == "throttle-applied":
         rate = details.get("rate_bps")
         if isinstance(rate, int):
